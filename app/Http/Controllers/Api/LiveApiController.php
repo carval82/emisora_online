@@ -28,7 +28,7 @@ class LiveApiController extends Controller
         return response()->json([
             'is_live' => true,
             'chunks' => $this->live->getChunksAfter($after, $limit),
-            'latest_index' => (int) $this->live->getStatus()['latest_index'],
+            'latest_index' => $this->live->getLatestIndex(),
         ]);
     }
 
@@ -107,7 +107,7 @@ class LiveApiController extends Controller
                 return $next;
             }
 
-            $latest = (int) $this->live->getStatus()['latest_index'];
+            $latest = $this->live->getLatestIndex();
             if ($latest > $after && $this->live->getChunkPath($latest)) {
                 return $latest;
             }
@@ -130,14 +130,13 @@ class LiveApiController extends Controller
         }
 
         $after = (int) $request->query('after', -1);
-        $wait = min(max((int) $request->query('wait', 800), 150), 3000);
-        $binary = $this->live->packChunksAfter($after, $wait);
+        $binary = $this->live->packChunksAfter($after);
 
         return response($binary, 200, [
             'Content-Type' => 'application/octet-stream',
             'Cache-Control' => 'no-cache, no-store',
             'X-Live-Active' => '1',
-            'X-Latest-Index' => (string) $this->live->getStatus()['latest_index'],
+            'X-Latest-Index' => (string) $this->live->getLatestIndex(),
         ]);
     }
 
@@ -148,9 +147,10 @@ class LiveApiController extends Controller
         }
 
         $path = $this->live->getStreamPath();
+        $liveEdge = $request->boolean('live', false);
         $startPos = max(0, (int) $request->query('pos', 0));
 
-        return response()->stream(function () use ($path, $startPos) {
+        return response()->stream(function () use ($path, $startPos, $liveEdge) {
             if (function_exists('apache_setenv')) {
                 @apache_setenv('no-gzip', '1');
             }
@@ -158,15 +158,27 @@ class LiveApiController extends Controller
             @ini_set('zlib.output_compression', '0');
             @ini_set('output_buffering', 'off');
             @ini_set('implicit_flush', '1');
+            @set_time_limit(0);
 
             while (ob_get_level() > 0) {
                 ob_end_flush();
             }
 
-            $pos = $startPos;
+            if ($liveEdge) {
+                $init = $this->live->getInitBinary();
+                if ($init) {
+                    echo $init;
+                    flush();
+                }
+                clearstatcache(true, $path);
+                $pos = is_readable($path) ? (int) filesize($path) : 0;
+            } else {
+                $pos = $startPos;
+            }
+
             $idleTicks = 0;
 
-            while ($idleTicks < 60) {
+            while ($idleTicks < 600) {
                 if (connection_aborted()) {
                     break;
                 }
@@ -180,7 +192,7 @@ class LiveApiController extends Controller
                         fseek($handle, $pos);
 
                         while ($pos < $size && ! connection_aborted()) {
-                            $chunk = fread($handle, 16384);
+                            $chunk = fread($handle, 32768);
                             if ($chunk === false || $chunk === '') {
                                 break;
                             }
@@ -199,7 +211,7 @@ class LiveApiController extends Controller
                         $idleTicks++;
                     }
 
-                    usleep(100_000);
+                    usleep(80_000);
                 }
             }
         }, 200, [

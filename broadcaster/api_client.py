@@ -66,14 +66,13 @@ class BroadcasterClient:
         return response.json()
 
     def upload_chunk(self, path: Path) -> dict:
-        with path.open("rb") as handle:
-            response = self.session.post(
-                f"{self.server_url}/api/broadcaster/chunk",
-                headers=self._headers(),
-                files={"chunk": (path.name, handle, "audio/webm")},
-                data={"mime": "audio/webm"},
-                timeout=60,
-            )
+        data = path.read_bytes()
+        response = self.session.post(
+            f"{self.server_url}/api/broadcaster/chunk",
+            headers={**self._headers(), "Content-Type": "audio/webm"},
+            data=data,
+            timeout=60,
+        )
         data = response.json()
         if response.status_code != 200:
             raise RuntimeError(data.get("error", "Error al subir chunk"))

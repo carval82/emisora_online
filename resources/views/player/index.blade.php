@@ -164,102 +164,21 @@
         let stationIsLive = false;
         let stationLiveHost = '';
         let liveNeedsGesture = false;
-        let lastChunkIndex = -1;
         let liveStarted = false;
         let liveLoopActive = false;
         let audioUnlocked = false;
-        let mediaSource = null;
-        let sourceBuffer = null;
-        let mseObjectUrl = null;
-        let mseInitDone = false;
-        let mseAppendQueue = [];
-        let mseAppending = false;
-        let latestLiveIndex = -1;
-        let livePollBusy = false;
         let autoLiveLock = false;
-        const LIVE_POLL_MS = 120;
-        const MAX_LIVE_LAG = 14;
-        const LIVE_PACK_WAIT = 550;
 
         function teardownLive() {
             liveNeedsGesture = false;
             liveStarted = false;
             liveLoopActive = false;
-            lastChunkIndex = -1;
-            latestLiveIndex = -1;
-            livePollBusy = false;
-            mseInitDone = false;
-            mseAppendQueue = [];
-            mseAppending = false;
 
             if (livePollTimer) { clearTimeout(livePollTimer); livePollTimer = null; }
-
-            if (mediaSource) {
-                try {
-                    if (mediaSource.readyState === 'open') mediaSource.endOfStream();
-                } catch (e) {}
-            }
-            if (mseObjectUrl) {
-                URL.revokeObjectURL(mseObjectUrl);
-                mseObjectUrl = null;
-            }
-            mediaSource = null;
-            sourceBuffer = null;
 
             audio.pause();
             audio.removeAttribute('src');
             audio.load();
-        }
-
-        function parsePack(buffer) {
-            const view = new DataView(buffer);
-            const chunks = [];
-            let offset = 0;
-            while (offset + 8 <= buffer.byteLength) {
-                const index = view.getUint32(offset, false);
-                const length = view.getUint32(offset + 4, false);
-                offset += 8;
-                if (!length || offset + length > buffer.byteLength) break;
-                chunks.push({ index, buf: buffer.slice(offset, offset + length) });
-                offset += length;
-            }
-            return chunks;
-        }
-
-        function queueMseAppend(index, buf) {
-            if (index <= lastChunkIndex) return;
-            mseAppendQueue.push({ index, buf });
-            mseAppendQueue.sort((a, b) => a.index - b.index);
-            drainMseQueue();
-        }
-
-        function drainMseQueue() {
-            if (!sourceBuffer || mseAppending || !mseAppendQueue.length) return;
-            if (sourceBuffer.updating) return;
-
-            const next = mseAppendQueue.shift();
-            if (next.index <= lastChunkIndex) {
-                drainMseQueue();
-                return;
-            }
-
-            mseAppending = true;
-            try {
-                sourceBuffer.appendBuffer(next.buf);
-                lastChunkIndex = next.index;
-            } catch (e) {
-                mseAppending = false;
-                mseAppendQueue.unshift(next);
-            }
-        }
-
-        function trimMseBuffer() {
-            if (!sourceBuffer || sourceBuffer.updating || !audio.currentTime) return;
-            try {
-                if (sourceBuffer.buffered.length && audio.currentTime > 22) {
-                    sourceBuffer.remove(0, audio.currentTime - 14);
-                }
-            } catch (e) {}
         }
 
         function showTapOverlay() {
@@ -300,122 +219,25 @@
             }
         }
 
-        async function setupMse() {
-            if (mediaSource) return;
-
-            mediaSource = new MediaSource();
-            mseObjectUrl = URL.createObjectURL(mediaSource);
-            audio.src = mseObjectUrl;
-
-            await new Promise((resolve, reject) => {
-                mediaSource.addEventListener('sourceopen', resolve, { once: true });
-                mediaSource.addEventListener('error', reject, { once: true });
-            });
-
-            sourceBuffer = mediaSource.addSourceBuffer('audio/webm; codecs="opus"');
-            sourceBuffer.mode = 'sequence';
-
-            sourceBuffer.addEventListener('updateend', () => {
-                mseAppending = false;
-                drainMseQueue();
-                trimMseBuffer();
-
-                if (!liveStarted && sourceBuffer.buffered.length) {
-                    tryPlayLiveAudio();
-                }
-            });
-
-            const initRes = await fetch('/api/live/init');
-            if (!initRes.ok) throw new Error('init');
-            const initBuf = await initRes.arrayBuffer();
-            await new Promise((resolve, reject) => {
-                const onEnd = () => { sourceBuffer.removeEventListener('updateend', onEnd); resolve(); };
-                sourceBuffer.addEventListener('updateend', onEnd);
-                sourceBuffer.addEventListener('error', reject, { once: true });
-                sourceBuffer.appendBuffer(initBuf);
-            });
-            mseInitDone = true;
-            mseAppending = false;
-        }
-
-        function resetMseLiveEdge() {
-            mseAppendQueue = [];
-            lastChunkIndex = Math.max(-1, latestLiveIndex - 3);
-            try {
-                if (sourceBuffer && !sourceBuffer.updating && sourceBuffer.buffered.length) {
-                    const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                    audio.currentTime = Math.max(0, end - 0.25);
-                }
-            } catch (e) {}
-        }
-
-        async function livePollAndAppend() {
+        function scheduleLiveMonitor() {
             if (!liveMode || !liveLoopActive) return;
-            if (livePollBusy) {
-                livePollTimer = setTimeout(livePollAndAppend, LIVE_POLL_MS);
-                return;
-            }
-
-            livePollBusy = true;
-
-            try {
-                if (!mseInitDone) await setupMse();
-
-                if (latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
-                    resetMseLiveEdge();
-                }
-
-                const res = await fetch(`/api/live/pack?after=${lastChunkIndex}&wait=${LIVE_PACK_WAIT}`);
-
-                if (res.status === 204 || res.headers.get('X-Live-Active') === '0') {
-                    exitLiveMode();
-                    return;
-                }
-
-                latestLiveIndex = parseInt(res.headers.get('X-Latest-Index') || '-1', 10);
-                if (latestLiveIndex >= 0 && latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
-                    resetMseLiveEdge();
-                }
-
-                if (res.ok) {
-                    const packed = await res.arrayBuffer();
-                    if (packed.byteLength) {
-                        for (const chunk of parsePack(packed)) {
-                            queueMseAppend(chunk.index, chunk.buf);
-                        }
-                    } else if (!liveStarted) {
-                        nowArtist.textContent = 'Esperando señal del estudio...';
+            if (livePollTimer) clearTimeout(livePollTimer);
+            livePollTimer = setTimeout(async () => {
+                if (!liveMode) return;
+                try {
+                    const data = await (await fetch('/api/live/status')).json();
+                    if (!data.is_live) {
+                        exitLiveMode();
+                        return;
                     }
-                }
-
-                if (liveStarted && audio.paused && !liveNeedsGesture) {
-                    tryPlayLiveAudio();
-                }
-            } catch (e) {
-                if (liveMode && !liveStarted) {
-                    nowArtist.textContent = 'Reconectando en vivo...';
-                }
-            } finally {
-                livePollBusy = false;
-            }
-
-            if (liveMode) {
-                livePollTimer = setTimeout(livePollAndAppend, LIVE_POLL_MS);
-            }
+                } catch (e) {}
+                scheduleLiveMonitor();
+            }, 10000);
         }
 
         async function resumeLivePlayback() {
             try {
-                await setupMse();
-                if (!liveStarted) {
-                    const status = await (await fetch('/api/live/status')).json();
-                    latestLiveIndex = status.latest_index ?? -1;
-                    lastChunkIndex = Math.max(-1, latestLiveIndex - 2);
-                    liveHostName = status.host_name || liveHostName;
-                }
-                liveLoopActive = true;
                 await tryPlayLiveAudio();
-                livePollAndAppend();
             } catch (e) {
                 nowArtist.textContent = 'Toca aquí abajo para escuchar 🔊';
                 showTapOverlay();
@@ -429,11 +251,11 @@
 
             try {
                 const status = await (await fetch('/api/live/status')).json();
-                latestLiveIndex = status.latest_index ?? -1;
-                lastChunkIndex = Math.max(-1, latestLiveIndex - 2);
                 liveHostName = status.host_name || liveHostName;
-                await setupMse();
-                livePollAndAppend();
+                audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
+                audio.load();
+                await tryPlayLiveAudio();
+                scheduleLiveMonitor();
             } catch (e) {
                 nowArtist.textContent = 'Error al conectar — recarga la página';
             }
@@ -618,8 +440,25 @@
         });
 
         audio.addEventListener('waiting', () => {
-            if (liveMode) return;
+            if (liveMode) {
+                nowArtist.textContent = 'Buffering en vivo...';
+                return;
+            }
             setPlaying(false);
+        });
+        audio.addEventListener('stalled', () => {
+            if (liveMode && liveLoopActive && !liveNeedsGesture) {
+                nowArtist.textContent = 'Reconectando en vivo...';
+                const pos = audio.src;
+                audio.src = '';
+                audio.load();
+                setTimeout(() => {
+                    if (!liveMode) return;
+                    audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
+                    audio.load();
+                    tryPlayLiveAudio();
+                }, 800);
+            }
         });
         audio.addEventListener('playing', () => {
             if (liveMode) setPlaying(true);
@@ -699,8 +538,22 @@
             if (!liveMode && !stationIsLive) {
                 await loadQueue();
             }
-            setInterval(checkLiveStatus, 3000);
-            setInterval(refreshMessages, 15000);
+            scheduleStationPoll();
+            scheduleMessagesPoll();
+        }
+
+        function scheduleStationPoll() {
+            setTimeout(async () => {
+                await checkLiveStatus();
+                scheduleStationPoll();
+            }, liveMode ? 10000 : 4000);
+        }
+
+        function scheduleMessagesPoll() {
+            setTimeout(async () => {
+                await refreshMessages();
+                scheduleMessagesPoll();
+            }, liveMode ? 30000 : 15000);
         }
 
         const savedName = localStorage.getItem('emisora_sender_name');

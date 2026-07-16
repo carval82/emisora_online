@@ -31,6 +31,25 @@ php artisan config:cache >/dev/null 2>&1 || true
 php artisan route:cache >/dev/null 2>&1 || true
 php artisan view:cache >/dev/null 2>&1 || true
 
+if [ -z "${CACHE_STORE:-}" ]; then
+  export CACHE_STORE=file
+  echo "CACHE_STORE=file (recomendado para live; evita PostgreSQL en cada chunk/pack)"
+fi
+
+PHP_FPM_CONF="/assets/php-fpm.conf"
+if [ -f "${PHP_FPM_CONF}" ] && ! grep -q "pm.max_children = 20" "${PHP_FPM_CONF}"; then
+  {
+    echo ""
+    echo "[www]"
+    echo "pm = dynamic"
+    echo "pm.max_children = 20"
+    echo "pm.start_servers = 4"
+    echo "pm.min_spare_servers = 2"
+    echo "pm.max_spare_servers = 8"
+  } >> "${PHP_FPM_CONF}"
+  echo "php-fpm: pm.max_children=20"
+fi
+
 echo "Iniciando nginx + php-fpm (concurrencia para live)..."
 if [ -f /assets/start.sh ]; then
   exec /assets/start.sh

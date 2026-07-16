@@ -7,11 +7,13 @@ use App\Models\Message;
 use App\Models\Playlist;
 use App\Models\Song;
 use App\Models\StationSetting;
+use App\Services\LiveStreamService;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class PlayerApiController extends Controller
 {
+    public function __construct(private LiveStreamService $live) {}
     public function localAudio(Song $song): BinaryFileResponse
     {
         abort_unless($song->isLocal(), 404);
@@ -40,13 +42,14 @@ class PlayerApiController extends Controller
     public function station()
     {
         $station = StationSetting::current()->load('currentPlaylist');
+        $liveStatus = $this->live->getStatus();
 
         return response()->json([
             'name' => $station->name,
             'slogan' => $station->slogan,
             'logo_url' => $station->logo_url,
-            'is_live' => $station->is_live,
-            'host_name' => $station->live_host_name,
+            'is_live' => $liveStatus['is_live'],
+            'host_name' => $liveStatus['is_live'] ? $liveStatus['host_name'] : $station->live_host_name,
             'playlist' => $station->currentPlaylist?->name,
         ]);
     }

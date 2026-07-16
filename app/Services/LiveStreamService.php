@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Models\StationSetting;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 
 class LiveStreamService
@@ -19,10 +18,13 @@ class LiveStreamService
 
     private string $streamPath;
 
+    private string $statePath;
+
     public function __construct()
     {
         $this->chunkPath = storage_path('app/live/chunks');
         $this->streamPath = storage_path('app/live/stream.webm');
+        $this->statePath = storage_path('app/live/state.json');
     }
 
     public function start(?string $hostName = null): void
@@ -32,11 +34,17 @@ class LiveStreamService
         $this->clearChunks();
         File::ensureDirectoryExists($this->chunkPath);
 
-        Cache::put('live:active', true, now()->addHours(6));
-        Cache::put('live:index', -1, now()->addHours(6));
-        Cache::put('live:host', $hostName ?: 'Locutor en vivo', now()->addHours(6));
-        Cache::put('live:started_at', now()->toIso8601String(), now()->addHours(6));
-        Cache::put('live:stream_bytes', 0, now()->addHours(6));
+        $host = $hostName ?: 'Locutor en vivo';
+        $startedAt = now()->toIso8601String();
+
+        $this->writeLiveState([
+            'active' => true,
+            'index' => -1,
+            'host' => $host,
+            'started_at' => $startedAt,
+            'last_chunk_at' => null,
+            'stream_bytes' => 0,
+        ]);
 
         $station->update([
             'is_live' => true,
@@ -48,13 +56,10 @@ class LiveStreamService
     public function stop(): void
     {
         $this->clearChunks();
-        Cache::forget('live:active');
-        Cache::forget('live:index');
-        Cache::forget('live:host');
-        Cache::forget('live:started_at');
-        Cache::forget('live:last_chunk_at');
-        Cache::forget('live:init');
-        Cache::forget('live:stream_bytes');
+
+        if (file_exists($this->statePath)) {
+            @unlink($this->statePath);
+        }
 
         StationSetting::current()->update([
             'is_live' => false,
@@ -67,42 +72,36 @@ class LiveStreamService
     {
         File::ensureDirectoryExists($this->chunkPath);
 
-        $index = (int) Cache::get('live:index', -1) + 1;
+        $index = $this->getLatestIndex() + 1;
         $extension = str_contains($mime, 'ogg') ? 'ogg' : (str_contains($mime, 'mp4') ? 'm4a' : 'webm');
 
-        file_put_contents("{$this->chunkPath}/{$index}.{$extension}", $binaryData);
+        file_put_contents("{$this->chunkPath}/{$index}.{$extension}", $binaryData, LOCK_EX);
 
         if ($index === 0) {
             $init = $this->extractWebmInit($binaryData);
-            file_put_contents("{$this->chunkPath}/init.{$extension}", $init);
-            Cache::put('live:init', $init, now()->addHours(6));
+            file_put_contents("{$this->chunkPath}/init.{$extension}", $init, LOCK_EX);
         }
 
-        Cache::put('live:chunk_meta', array_merge(Cache::get('live:chunk_meta', []), [
-            $index => ['mime' => $mime, 'ext' => $extension, 'size' => strlen($binaryData)],
-        ]), now()->addMinutes(15));
-
-        Cache::put('live:index', $index, now()->addHours(6));
-        Cache::put('live:last_chunk_at', now()->toIso8601String(), now()->addHours(6));
-
-        $this->appendToStream($index);
-
-        $this->pruneOldChunks($index);
+        $this->writeLiveState([
+            'active' => true,
+            'index' => $index,
+            'last_chunk_at' => now()->toIso8601String(),
+        ]);
 
         return $index;
     }
 
+    public function finalizeChunk(int $index): void
+    {
+        $this->appendToStream($index);
+
+        if ($index % 10 === 0) {
+            $this->pruneOldChunks($index);
+        }
+    }
+
     public function getChunkPath(int $index): ?string
     {
-        $meta = Cache::get('live:chunk_meta', [])[$index] ?? null;
-
-        if ($meta) {
-            $path = "{$this->chunkPath}/{$index}.{$meta['ext']}";
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
         foreach (['webm', 'ogg', 'm4a'] as $ext) {
             $path = "{$this->chunkPath}/{$index}.{$ext}";
             if (file_exists($path)) {
@@ -115,7 +114,17 @@ class LiveStreamService
 
     public function getChunkMime(int $index): string
     {
-        return Cache::get('live:chunk_meta', [])[$index]['mime'] ?? 'audio/webm';
+        $path = $this->getChunkPath($index);
+
+        if (! $path) {
+            return 'audio/webm';
+        }
+
+        return match (pathinfo($path, PATHINFO_EXTENSION)) {
+            'ogg' => 'audio/ogg',
+            'm4a' => 'audio/mp4',
+            default => 'audio/webm',
+        };
     }
 
     public function getStreamPath(): string
@@ -131,7 +140,7 @@ class LiveStreamService
             return (int) filesize($this->streamPath);
         }
 
-        return (int) Cache::get('live:stream_bytes', 0);
+        return (int) ($this->readLiveState()['stream_bytes'] ?? 0);
     }
 
     public function getInitBinary(): ?string
@@ -163,26 +172,29 @@ class LiveStreamService
 
     public function isActive(): bool
     {
-        return (bool) Cache::get('live:active', false)
-            || StationSetting::current()->is_live;
+        return (bool) ($this->readLiveState()['active'] ?? false);
+    }
+
+    public function getLatestIndex(): int
+    {
+        return (int) ($this->readLiveState()['index'] ?? -1);
     }
 
     public function getStatus(): array
     {
-        $station = StationSetting::current();
+        $state = $this->readLiveState();
 
         return [
-            'is_live' => $this->isActive(),
-            'host_name' => Cache::get('live:host') ?: $station->live_host_name,
-            'started_at' => Cache::get('live:started_at') ?: $station->live_started_at?->toIso8601String(),
-            'latest_index' => (int) Cache::get('live:index', -1),
+            'is_live' => (bool) ($state['active'] ?? false),
+            'host_name' => $state['host'] ?? 'Locutor en vivo',
+            'started_at' => $state['started_at'] ?? null,
+            'latest_index' => (int) ($state['index'] ?? -1),
         ];
     }
 
     public function getChunksAfter(int $after, int $limit = 0): array
     {
-        $latest = (int) Cache::get('live:index', -1);
-        $meta = Cache::get('live:chunk_meta', []);
+        $latest = $this->getLatestIndex();
         $chunks = [];
 
         $start = $after + 1;
@@ -191,7 +203,7 @@ class LiveStreamService
             $chunks[] = [
                 'index' => 0,
                 'url' => url('/api/live/audio/0'),
-                'mime' => $meta[0]['mime'] ?? 'audio/webm',
+                'mime' => $this->getChunkMime(0),
             ];
             $start = 1;
         }
@@ -201,7 +213,7 @@ class LiveStreamService
                 $chunks[] = [
                     'index' => $i,
                     'url' => url("/api/live/audio/{$i}"),
-                    'mime' => $meta[$i]['mime'] ?? 'audio/webm',
+                    'mime' => $this->getChunkMime($i),
                 ];
             }
         }
@@ -214,28 +226,20 @@ class LiveStreamService
     }
 
     /**
-     * Espera hasta que haya segmentos nuevos (long-poll) y los devuelve empaquetados
-     * en binario: [index uint32 BE][length uint32 BE][data...] por cada segmento.
+     * Devuelve segmentos empaquetados en binario: [index uint32 BE][length uint32 BE][data...]
      */
-    public function packChunksAfter(int $after, int $waitMs = 3000): string
+    public function packChunksAfter(int $after): string
     {
-        $deadline = microtime(true) + ($waitMs / 1000);
+        if (! $this->isActive()) {
+            return '';
+        }
 
-        do {
-            $binary = $this->buildPackAfter($after);
-            if ($binary !== '' || ! $this->isActive()) {
-                return $binary;
-            }
-
-            usleep(50_000);
-        } while (microtime(true) < $deadline);
-
-        return '';
+        return $this->buildPackAfter($after);
     }
 
     private function buildPackAfter(int $after): string
     {
-        $latest = (int) Cache::get('live:index', -1);
+        $latest = $this->getLatestIndex();
 
         if ($latest < 0) {
             return '';
@@ -295,11 +299,6 @@ class LiveStreamService
 
     private function getInitSegment(): ?string
     {
-        $cached = Cache::get('live:init');
-        if (is_string($cached) && strlen($cached) > 10) {
-            return $cached;
-        }
-
         foreach (['webm', 'ogg', 'm4a'] as $ext) {
             $path = "{$this->chunkPath}/init.{$ext}";
             if (is_readable($path)) {
@@ -354,7 +353,7 @@ class LiveStreamService
 
         file_put_contents($this->streamPath, $data, FILE_APPEND | LOCK_EX);
         clearstatcache(true, $this->streamPath);
-        Cache::put('live:stream_bytes', filesize($this->streamPath), now()->addHours(6));
+        $this->writeLiveState(['stream_bytes' => (int) filesize($this->streamPath)]);
     }
 
     private function pruneOldChunks(int $currentIndex): void
@@ -364,20 +363,15 @@ class LiveStreamService
             return;
         }
 
-        $meta = Cache::get('live:chunk_meta', []);
-
         for ($i = 0; $i <= $threshold; $i++) {
             if ($i === 0) {
                 continue;
             }
-            $path = $this->getChunkPath($i);
-            if ($path) {
-                @unlink($path);
-            }
-            unset($meta[$i]);
-        }
 
-        Cache::put('live:chunk_meta', $meta, now()->addMinutes(15));
+            foreach (['webm', 'ogg', 'm4a'] as $ext) {
+                @unlink("{$this->chunkPath}/{$i}.{$ext}");
+            }
+        }
     }
 
     private function clearChunks(): void
@@ -386,11 +380,44 @@ class LiveStreamService
             File::cleanDirectory($this->chunkPath);
         }
 
-        Cache::forget('live:chunk_meta');
-        Cache::forget('live:init');
-
         if (file_exists($this->streamPath)) {
             @unlink($this->streamPath);
         }
+    }
+
+    private function readLiveState(): array
+    {
+        if (! is_readable($this->statePath)) {
+            return [
+                'active' => false,
+                'index' => -1,
+                'host' => null,
+                'started_at' => null,
+                'last_chunk_at' => null,
+                'stream_bytes' => 0,
+            ];
+        }
+
+        $data = json_decode((string) file_get_contents($this->statePath), true);
+
+        if (! is_array($data)) {
+            return ['active' => false, 'index' => -1];
+        }
+
+        return array_merge([
+            'active' => false,
+            'index' => -1,
+            'host' => null,
+            'started_at' => null,
+            'last_chunk_at' => null,
+            'stream_bytes' => 0,
+        ], $data);
+    }
+
+    private function writeLiveState(array $patch): void
+    {
+        File::ensureDirectoryExists(dirname($this->statePath));
+        $state = array_merge($this->readLiveState(), $patch);
+        file_put_contents($this->statePath, json_encode($state), LOCK_EX);
     }
 }
