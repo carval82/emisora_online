@@ -436,7 +436,14 @@
         document.getElementById('tap-overlay').addEventListener('click', resumeLiveOnGesture);
 
         audio.addEventListener('error', () => {
-            if (liveMode) return;
+            if (!liveMode || liveNeedsGesture) return;
+            nowArtist.textContent = 'Reconectando en vivo...';
+            setTimeout(() => {
+                if (!liveMode || liveLoopActive === false) return;
+                audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
+                audio.load();
+                tryPlayLiveAudio();
+            }, 1500);
         });
 
         audio.addEventListener('waiting', () => {

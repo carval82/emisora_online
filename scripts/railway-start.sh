@@ -18,6 +18,13 @@ fi
 export DB_CONNECTION="${DB_CONNECTION:-pgsql}"
 export DB_URL="${DB_URL:-${DATABASE_URL:-}}"
 
+if [ -z "${CACHE_STORE:-}" ]; then
+  export CACHE_STORE=file
+fi
+if [ -z "${SESSION_DRIVER:-}" ]; then
+  export SESSION_DRIVER=file
+fi
+
 php artisan config:clear >/dev/null 2>&1 || true
 php artisan storage:link >/dev/null 2>&1 || true
 
@@ -31,29 +38,13 @@ php artisan config:cache >/dev/null 2>&1 || true
 php artisan route:cache >/dev/null 2>&1 || true
 php artisan view:cache >/dev/null 2>&1 || true
 
-if [ -z "${CACHE_STORE:-}" ]; then
-  export CACHE_STORE=file
-  echo "CACHE_STORE=file (recomendado para live; evita PostgreSQL en cada chunk/pack)"
-fi
+echo "CACHE_STORE=${CACHE_STORE:-file} SESSION_DRIVER=${SESSION_DRIVER:-file}"
 
-PHP_FPM_CONF="/assets/php-fpm.conf"
-if [ -f "${PHP_FPM_CONF}" ] && ! grep -q "pm.max_children = 20" "${PHP_FPM_CONF}"; then
-  {
-    echo ""
-    echo "[www]"
-    echo "pm = dynamic"
-    echo "pm.max_children = 20"
-    echo "pm.start_servers = 4"
-    echo "pm.min_spare_servers = 2"
-    echo "pm.max_spare_servers = 8"
-  } >> "${PHP_FPM_CONF}"
-  echo "php-fpm: pm.max_children=20"
-fi
+chmod +x /app/scripts/start-nginx-fpm.sh 2>/dev/null || true
 
-echo "Iniciando nginx + php-fpm (concurrencia para live)..."
+echo "Iniciando nginx + php-fpm..."
 if [ -f /assets/start.sh ]; then
   exec /assets/start.sh
 fi
 
-echo "Fallback: php artisan serve (solo desarrollo)"
-exec php artisan serve --host=0.0.0.0 --port="${PORT}"
+exec bash /app/scripts/start-nginx-fpm.sh

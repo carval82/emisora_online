@@ -73,6 +73,8 @@ class BroadcasterClient:
             data=data,
             timeout=60,
         )
+        if response.status_code == 403:
+            return {"forbidden": True, "error": "Transmision no activa"}
         data = response.json()
         if response.status_code != 200:
             raise RuntimeError(data.get("error", "Error al subir chunk"))

@@ -641,6 +641,10 @@ class BroadcasterApp(tk.Tk):
                     if path.stat().st_size != s1:
                         continue
                     data = self.client.upload_chunk(path)
+                    if data.get("forbidden"):
+                        path.unlink(missing_ok=True)
+                        time.sleep(1.5)
+                        continue
                     uploaded.add(path.name)
                     self.chunks_sent += 1
                     self.after(0, lambda i=data.get("index"), s=data.get("size"): self.log_line(f"✓ chunk {i} ({round((s or 0)/1024)} KB)"))

@@ -9,4 +9,5 @@ NIXPACKS_NODE_VERSION = "22"
 [phases.build]
 cmds = [
   "npm run build",
+  "chmod +x scripts/start-nginx-fpm.sh scripts/railway-start.sh",
 ]
