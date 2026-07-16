@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#7c3aed">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/app/manifest.json">
+    <link rel="icon" href="/app/icon.svg" type="image/svg+xml">
+    <title>Emisora Oyente</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: 'Outfit', system-ui, sans-serif;
+            background: #0f0a1a;
+            color: #f8fafc;
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
+        }
+        .topbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 12px;
+            background: rgba(15, 10, 26, 0.95);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            backdrop-filter: blur(8px);
+            z-index: 10;
+        }
+        .topbar h1 { font-size: 15px; font-weight: 700; margin: 0; flex: 1; }
+        .topbar small { display: block; font-size: 10px; color: #94a3b8; font-weight: 400; }
+        .btn-icon {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #e2e8f0;
+            border-radius: 10px;
+            width: 38px;
+            height: 38px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .btn-icon:active { transform: scale(0.96); }
+        #player-frame {
+            flex: 1;
+            border: 0;
+            width: 100%;
+            background: #0f0a1a;
+        }
+        .config {
+            position: fixed;
+            inset: 0;
+            background: rgba(3, 7, 18, 0.85);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            z-index: 20;
+        }
+        .config.open { display: flex; }
+        .config-card {
+            width: 100%;
+            max-width: 420px;
+            background: #1c1c24;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 24px;
+        }
+        .config-card h2 { margin: 0 0 8px; font-size: 20px; }
+        .config-card p { margin: 0 0 16px; color: #94a3b8; font-size: 14px; line-height: 1.4; }
+        label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+        input {
+            width: 100%;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 12px;
+            padding: 12px 14px;
+            color: #fff;
+            font-size: 14px;
+            margin-bottom: 14px;
+        }
+        input:focus { outline: none; border-color: #8b5cf6; }
+        .actions { display: flex; gap: 10px; }
+        .btn {
+            flex: 1;
+            border: 0;
+            border-radius: 12px;
+            padding: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-primary { background: #7c3aed; color: white; }
+        .btn-secondary { background: rgba(255,255,255,0.08); color: #cbd5e1; }
+        .status {
+            margin-top: 12px;
+            font-size: 12px;
+            color: #64748b;
+            min-height: 18px;
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <h1>📻 Emisora Oyente</h1>
+            <small id="server-label">Sin servidor</small>
+        </div>
+        <button class="btn-icon" id="btn-reload" title="Recargar">↻</button>
+        <button class="btn-icon" id="btn-config" title="Servidor">⚙</button>
+    </header>
+
+    <iframe id="player-frame" title="Reproductor" allow="autoplay"></iframe>
+
+    <div class="config open" id="config-panel">
+        <div class="config-card">
+            <h2>Conectar emisora</h2>
+            <p>Introduce la URL de tu servidor Laravel (Railway o local).</p>
+            <label for="server-url">Dirección del servidor</label>
+            <input type="url" id="server-url" placeholder="https://emisoraonline-production.up.railway.app" autocomplete="url">
+            <div class="actions">
+                <button class="btn btn-secondary" id="btn-cancel" type="button">Cancelar</button>
+                <button class="btn btn-primary" id="btn-connect" type="button">Conectar</button>
+            </div>
+            <p class="status" id="config-status"></p>
+        </div>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'emisora_listener_server';
+        const DEFAULT_SERVER = 'https://emisoraonline-production.up.railway.app';
+
+        const frame = document.getElementById('player-frame');
+        const panel = document.getElementById('config-panel');
+        const input = document.getElementById('server-url');
+        const status = document.getElementById('config-status');
+        const serverLabel = document.getElementById('server-label');
+
+        function normalizeUrl(raw) {
+            let url = (raw || '').trim().replace(/\/+$/, '');
+            if (!url) return '';
+            if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+            return url;
+        }
+
+        function loadServer() {
+            return normalizeUrl(localStorage.getItem(STORAGE_KEY) || DEFAULT_SERVER);
+        }
+
+        function saveServer(url) {
+            localStorage.setItem(STORAGE_KEY, url);
+        }
+
+        function openPlayer(url, showPanel = false) {
+            const normalized = normalizeUrl(url);
+            if (!normalized) {
+                panel.classList.add('open');
+                status.textContent = 'Ingresa una URL válida.';
+                return;
+            }
+
+            saveServer(normalized);
+            serverLabel.textContent = normalized.replace(/^https?:\/\//, '');
+            frame.src = normalized + '/';
+            panel.classList.remove('open');
+            status.textContent = '';
+        }
+
+        document.getElementById('btn-connect').addEventListener('click', () => {
+            openPlayer(input.value, false);
+        });
+
+        document.getElementById('btn-cancel').addEventListener('click', () => {
+            if (frame.src && frame.src !== 'about:blank') {
+                panel.classList.remove('open');
+            } else {
+                status.textContent = 'Configura el servidor para escuchar.';
+            }
+        });
+
+        document.getElementById('btn-config').addEventListener('click', () => {
+            input.value = loadServer() || DEFAULT_SERVER;
+            panel.classList.add('open');
+        });
+
+        document.getElementById('btn-reload').addEventListener('click', () => {
+            if (frame.src) frame.contentWindow.location.reload();
+        });
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') openPlayer(input.value);
+        });
+
+        const saved = loadServer();
+        input.value = saved || DEFAULT_SERVER;
+        if (saved) {
+            openPlayer(saved);
+        } else {
+            input.value = DEFAULT_SERVER;
+        }
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/app/sw.js').catch(() => {});
+        }
+    </script>
+</body>
+</html>

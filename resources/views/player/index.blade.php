@@ -94,29 +94,44 @@
         </div>
 
         <!-- Messages -->
-        <div class="bg-white/5 backdrop-blur border border-white/10 rounded-2xl p-5 mb-4">
-            <h3 class="font-semibold text-sm mb-3 flex items-center gap-2">
-                💬 Mensajes
-                <span id="msg-count" class="text-xs bg-violet-600/50 px-2 py-0.5 rounded-full">{{ $messages->count() }}</span>
-            </h3>
-            <div id="messages-list" class="max-h-32 overflow-y-auto space-y-2 mb-4 text-sm">
-                @foreach($messages as $msg)
-                    <div class="bg-white/5 rounded-lg px-3 py-2">
-                        <span class="font-medium text-violet-300">{{ $msg->sender_name }}:</span>
-                        <span class="text-slate-300">{{ $msg->content }}</span>
-                    </div>
-                @endforeach
+        <section class="bg-white/5 backdrop-blur border border-white/10 rounded-2xl p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="font-semibold text-sm flex items-center gap-2">
+                    💬 Mensajes
+                    <span id="msg-count" class="text-xs bg-violet-600/60 px-2 py-0.5 rounded-full min-w-[1.5rem] text-center">{{ $messages->count() }}</span>
+                </h3>
+                <span class="text-[10px] text-slate-500 uppercase tracking-wide">Saludos en vivo</span>
             </div>
-            <form id="message-form" class="flex gap-2">
-                <input type="text" id="sender-name" placeholder="Tu nombre" maxlength="100" required
-                    class="flex-1 bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500">
-                <input type="text" id="message-content" placeholder="Escribe un mensaje..." maxlength="500" required
-                    class="flex-[2] bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500">
-                <button type="submit" class="bg-violet-600 hover:bg-violet-500 px-4 py-2 rounded-lg text-sm font-medium">Enviar</button>
-            </form>
-        </div>
 
-        <footer class="text-center text-slate-600 text-xs py-2">
+            <div id="messages-list" class="min-h-[88px] max-h-44 overflow-y-auto space-y-2 mb-4 text-sm pr-1 scroll-smooth">
+                @forelse($messages as $msg)
+                    <article class="bg-white/5 border border-white/5 rounded-xl px-3 py-2.5">
+                        <div class="flex items-baseline justify-between gap-2">
+                            <span class="font-medium text-violet-300 truncate">{{ $msg->sender_name }}</span>
+                            <time class="text-[10px] text-slate-500 shrink-0">{{ $msg->created_at->diffForHumans() }}</time>
+                        </div>
+                        <p class="text-slate-200 mt-1 break-words leading-snug">{{ $msg->content }}</p>
+                    </article>
+                @empty
+                    <p id="messages-empty" class="text-center text-slate-500 text-sm py-6">Sé el primero en saludar 👋</p>
+                @endforelse
+            </div>
+
+            <form id="message-form" class="space-y-2">
+                <input type="text" id="sender-name" placeholder="Tu nombre" maxlength="100" required autocomplete="nickname"
+                    class="w-full bg-white/10 border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40">
+                <textarea id="message-content" placeholder="Escribe un mensaje para la emisora..." maxlength="500" required rows="2"
+                    class="w-full bg-white/10 border border-white/10 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/40"></textarea>
+                <button type="submit" id="message-submit"
+                    class="w-full bg-violet-600 hover:bg-violet-500 active:bg-violet-700 px-4 py-2.5 rounded-xl text-sm font-semibold transition">
+                    Enviar mensaje
+                </button>
+            </form>
+        </section>
+
+        <footer class="text-center text-slate-600 text-xs py-2 space-x-3">
+            <a href="/app/" class="hover:text-violet-400">App oyente</a>
+            <span>·</span>
             <a href="/admin" class="hover:text-violet-400">Admin</a>
         </footer>
     </div>
@@ -573,35 +588,71 @@
             const content = document.getElementById('message-content').value.trim();
             if (!name || !content) return;
 
-            const res = await fetch('/api/messages', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
-                },
-                body: JSON.stringify({ sender_name: name, content }),
-            });
+            const btn = document.getElementById('message-submit');
+            btn.disabled = true;
+            btn.textContent = 'Enviando...';
 
-            if (res.ok) {
-                const data = await res.json();
-                const list = document.getElementById('messages-list');
-                const div = document.createElement('div');
-                div.className = 'bg-white/5 rounded-lg px-3 py-2';
-                div.innerHTML = `<span class="font-medium text-violet-300">${data.message.sender_name}:</span> <span class="text-slate-300">${data.message.content}</span>`;
-                list.prepend(div);
-                document.getElementById('message-content').value = '';
+            try {
+                const res = await fetch('/api/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
+                        'Accept': 'application/json',
+                    },
+                    body: JSON.stringify({ sender_name: name, content }),
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    localStorage.setItem('emisora_sender_name', name);
+                    prependMessage(data.message);
+                    document.getElementById('message-content').value = '';
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Enviar mensaje';
             }
         });
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text ?? '';
+            return div.innerHTML;
+        }
+
+        function renderMessage(m) {
+            return `<article class="bg-white/5 border border-white/5 rounded-xl px-3 py-2.5">
+                <div class="flex items-baseline justify-between gap-2">
+                    <span class="font-medium text-violet-300 truncate">${escapeHtml(m.sender_name)}</span>
+                    <time class="text-[10px] text-slate-500 shrink-0">${escapeHtml(m.created_at || 'ahora')}</time>
+                </div>
+                <p class="text-slate-200 mt-1 break-words leading-snug">${escapeHtml(m.content)}</p>
+            </article>`;
+        }
+
+        function prependMessage(m) {
+            const list = document.getElementById('messages-list');
+            const empty = document.getElementById('messages-empty');
+            if (empty) empty.remove();
+            list.insertAdjacentHTML('afterbegin', renderMessage(m));
+            document.getElementById('msg-count').textContent = list.querySelectorAll('article').length;
+        }
 
         async function refreshMessages() {
             const res = await fetch('/api/messages');
             const data = await res.json();
             const list = document.getElementById('messages-list');
-            list.innerHTML = data.messages.map(m =>
-                `<div class="bg-white/5 rounded-lg px-3 py-2"><span class="font-medium text-violet-300">${m.sender_name}:</span> <span class="text-slate-300">${m.content}</span></div>`
-            ).join('');
+            if (!data.messages.length) {
+                list.innerHTML = '<p id="messages-empty" class="text-center text-slate-500 text-sm py-6">Sé el primero en saludar 👋</p>';
+            } else {
+                list.innerHTML = data.messages.map(renderMessage).join('');
+            }
             document.getElementById('msg-count').textContent = data.messages.length;
         }
+
+        const savedName = localStorage.getItem('emisora_sender_name');
+        if (savedName) document.getElementById('sender-name').value = savedName;
 
         loadStation();
         loadQueue();

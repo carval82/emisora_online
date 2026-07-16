@@ -14,6 +14,7 @@ use App\Http\Controllers\PlayerController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', [PlayerController::class, 'index'])->name('player');
+Route::redirect('/app', '/app/');
 
 Route::prefix('api')->group(function () {
     Route::get('/station', [PlayerApiController::class, 'station']);

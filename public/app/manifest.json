@@ -1,0 +1,19 @@
+{
+    "name": "Emisora Oyente",
+    "short_name": "Oyente",
+    "description": "Escucha tu emisora online con servidor configurable",
+    "start_url": "/app/",
+    "scope": "/app/",
+    "display": "standalone",
+    "background_color": "#0f0a1a",
+    "theme_color": "#7c3aed",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "/app/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ]
+}
