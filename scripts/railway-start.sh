@@ -42,9 +42,5 @@ echo "CACHE_STORE=${CACHE_STORE:-file} SESSION_DRIVER=${SESSION_DRIVER:-file}"
 
 chmod +x /app/scripts/start-nginx-fpm.sh 2>/dev/null || true
 
-echo "Iniciando nginx + php-fpm..."
-if [ -f /assets/start.sh ]; then
-  exec /assets/start.sh
-fi
-
+echo "Iniciando nginx + php-fpm (produccion)..."
 exec bash /app/scripts/start-nginx-fpm.sh

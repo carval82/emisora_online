@@ -167,18 +167,208 @@
         let liveStarted = false;
         let liveLoopActive = false;
         let audioUnlocked = false;
+        let mediaSource = null;
+        let sourceBuffer = null;
+        let mseObjectUrl = null;
+        let mseInitDone = false;
+        let mseAppendQueue = [];
+        let mseAppending = false;
+        let lastChunkIndex = -1;
+        let latestLiveIndex = -1;
+        let livePollBusy = false;
+        let livePollAbort = null;
         let autoLiveLock = false;
+        const LIVE_POLL_FAST_MS = 350;
+        const LIVE_POLL_SLOW_MS = 550;
+        const MAX_LIVE_LAG = 14;
 
         function teardownLive() {
             liveNeedsGesture = false;
             liveStarted = false;
             liveLoopActive = false;
+            lastChunkIndex = -1;
+            latestLiveIndex = -1;
+            livePollBusy = false;
+            mseInitDone = false;
+            mseAppendQueue = [];
+            mseAppending = false;
 
             if (livePollTimer) { clearTimeout(livePollTimer); livePollTimer = null; }
+            if (livePollAbort) { livePollAbort.abort(); livePollAbort = null; }
+
+            if (mediaSource) {
+                try {
+                    if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+                } catch (e) {}
+            }
+            if (mseObjectUrl) {
+                URL.revokeObjectURL(mseObjectUrl);
+                mseObjectUrl = null;
+            }
+            mediaSource = null;
+            sourceBuffer = null;
 
             audio.pause();
             audio.removeAttribute('src');
             audio.load();
+        }
+
+        function parsePack(buffer) {
+            const view = new DataView(buffer);
+            const chunks = [];
+            let offset = 0;
+            while (offset + 8 <= buffer.byteLength) {
+                const index = view.getUint32(offset, false);
+                const length = view.getUint32(offset + 4, false);
+                offset += 8;
+                if (!length || offset + length > buffer.byteLength) break;
+                chunks.push({ index, buf: buffer.slice(offset, offset + length) });
+                offset += length;
+            }
+            return chunks;
+        }
+
+        function queueMseAppend(index, buf) {
+            if (index <= lastChunkIndex) return;
+            mseAppendQueue.push({ index, buf });
+            mseAppendQueue.sort((a, b) => a.index - b.index);
+            drainMseQueue();
+        }
+
+        function drainMseQueue() {
+            if (!sourceBuffer || mseAppending || !mseAppendQueue.length) return;
+            if (sourceBuffer.updating) return;
+
+            const next = mseAppendQueue.shift();
+            if (next.index <= lastChunkIndex) {
+                drainMseQueue();
+                return;
+            }
+
+            mseAppending = true;
+            try {
+                sourceBuffer.appendBuffer(next.buf);
+                lastChunkIndex = next.index;
+            } catch (e) {
+                mseAppending = false;
+                mseAppendQueue.unshift(next);
+            }
+        }
+
+        function trimMseBuffer() {
+            if (!sourceBuffer || sourceBuffer.updating || !audio.currentTime) return;
+            try {
+                if (sourceBuffer.buffered.length && audio.currentTime > 22) {
+                    sourceBuffer.remove(0, audio.currentTime - 14);
+                }
+            } catch (e) {}
+        }
+
+        async function setupMse() {
+            if (mediaSource) return;
+
+            mediaSource = new MediaSource();
+            mseObjectUrl = URL.createObjectURL(mediaSource);
+            audio.src = mseObjectUrl;
+
+            await new Promise((resolve, reject) => {
+                mediaSource.addEventListener('sourceopen', resolve, { once: true });
+                mediaSource.addEventListener('error', reject, { once: true });
+            });
+
+            sourceBuffer = mediaSource.addSourceBuffer('audio/webm; codecs="opus"');
+            sourceBuffer.mode = 'sequence';
+
+            sourceBuffer.addEventListener('updateend', () => {
+                mseAppending = false;
+                drainMseQueue();
+                trimMseBuffer();
+                if (!liveStarted && sourceBuffer.buffered.length) {
+                    tryPlayLiveAudio();
+                }
+            });
+
+            const initRes = await fetch('/api/live/init');
+            if (!initRes.ok) throw new Error('init');
+            const initBuf = await initRes.arrayBuffer();
+            await new Promise((resolve, reject) => {
+                const onEnd = () => { sourceBuffer.removeEventListener('updateend', onEnd); resolve(); };
+                sourceBuffer.addEventListener('updateend', onEnd);
+                sourceBuffer.addEventListener('error', reject, { once: true });
+                sourceBuffer.appendBuffer(initBuf);
+            });
+            mseInitDone = true;
+            mseAppending = false;
+        }
+
+        function resetMseLiveEdge() {
+            mseAppendQueue = [];
+            lastChunkIndex = Math.max(-1, latestLiveIndex - 3);
+        }
+
+        function scheduleLivePoll(delay = LIVE_POLL_FAST_MS) {
+            if (!liveMode || !liveLoopActive) return;
+            if (livePollTimer) clearTimeout(livePollTimer);
+            livePollTimer = setTimeout(livePollAndAppend, delay);
+        }
+
+        async function livePollAndAppend() {
+            if (!liveMode || !liveLoopActive) return;
+            if (livePollBusy) return;
+
+            livePollBusy = true;
+            let nextDelay = LIVE_POLL_SLOW_MS;
+
+            try {
+                if (!mseInitDone) await setupMse();
+
+                if (latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
+                    resetMseLiveEdge();
+                }
+
+                if (livePollAbort) livePollAbort.abort();
+                livePollAbort = new AbortController();
+
+                const res = await fetch(`/api/live/pack?after=${lastChunkIndex}`, {
+                    signal: livePollAbort.signal,
+                });
+
+                if (res.status === 204 || res.headers.get('X-Live-Active') === '0') {
+                    exitLiveMode();
+                    return;
+                }
+
+                latestLiveIndex = parseInt(res.headers.get('X-Latest-Index') || '-1', 10);
+                if (latestLiveIndex >= 0 && latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
+                    resetMseLiveEdge();
+                }
+
+                if (res.ok) {
+                    const packed = await res.arrayBuffer();
+                    if (packed.byteLength) {
+                        nextDelay = LIVE_POLL_FAST_MS;
+                        for (const chunk of parsePack(packed)) {
+                            queueMseAppend(chunk.index, chunk.buf);
+                        }
+                    } else if (!liveStarted) {
+                        nowArtist.textContent = 'Esperando señal del estudio...';
+                    }
+                }
+
+                if (liveStarted && audio.paused && !liveNeedsGesture) {
+                    tryPlayLiveAudio();
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') return;
+                if (liveMode && !liveStarted) {
+                    nowArtist.textContent = 'Reconectando en vivo...';
+                }
+            } finally {
+                livePollBusy = false;
+                livePollAbort = null;
+            }
+
+            scheduleLivePoll(nextDelay);
         }
 
         function showTapOverlay() {
@@ -219,25 +409,18 @@
             }
         }
 
-        function scheduleLiveMonitor() {
-            if (!liveMode || !liveLoopActive) return;
-            if (livePollTimer) clearTimeout(livePollTimer);
-            livePollTimer = setTimeout(async () => {
-                if (!liveMode) return;
-                try {
-                    const data = await (await fetch('/api/live/status')).json();
-                    if (!data.is_live) {
-                        exitLiveMode();
-                        return;
-                    }
-                } catch (e) {}
-                scheduleLiveMonitor();
-            }, 10000);
-        }
-
         async function resumeLivePlayback() {
             try {
+                await setupMse();
+                if (!liveStarted) {
+                    const status = await (await fetch('/api/live/status')).json();
+                    latestLiveIndex = status.latest_index ?? -1;
+                    lastChunkIndex = Math.max(-1, latestLiveIndex - 2);
+                    liveHostName = status.host_name || liveHostName;
+                }
+                liveLoopActive = true;
                 await tryPlayLiveAudio();
+                livePollAndAppend();
             } catch (e) {
                 nowArtist.textContent = 'Toca aquí abajo para escuchar 🔊';
                 showTapOverlay();
@@ -251,11 +434,11 @@
 
             try {
                 const status = await (await fetch('/api/live/status')).json();
+                latestLiveIndex = status.latest_index ?? -1;
+                lastChunkIndex = Math.max(-1, latestLiveIndex - 2);
                 liveHostName = status.host_name || liveHostName;
-                audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
-                audio.load();
-                await tryPlayLiveAudio();
-                scheduleLiveMonitor();
+                await setupMse();
+                livePollAndAppend();
             } catch (e) {
                 nowArtist.textContent = 'Error al conectar — recarga la página';
             }
@@ -436,36 +619,12 @@
         document.getElementById('tap-overlay').addEventListener('click', resumeLiveOnGesture);
 
         audio.addEventListener('error', () => {
-            if (!liveMode || liveNeedsGesture) return;
-            nowArtist.textContent = 'Reconectando en vivo...';
-            setTimeout(() => {
-                if (!liveMode || liveLoopActive === false) return;
-                audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
-                audio.load();
-                tryPlayLiveAudio();
-            }, 1500);
+            if (liveMode) return;
         });
 
         audio.addEventListener('waiting', () => {
-            if (liveMode) {
-                nowArtist.textContent = 'Buffering en vivo...';
-                return;
-            }
+            if (liveMode) return;
             setPlaying(false);
-        });
-        audio.addEventListener('stalled', () => {
-            if (liveMode && liveLoopActive && !liveNeedsGesture) {
-                nowArtist.textContent = 'Reconectando en vivo...';
-                const pos = audio.src;
-                audio.src = '';
-                audio.load();
-                setTimeout(() => {
-                    if (!liveMode) return;
-                    audio.src = `/api/live/stream?live=1&_=${Date.now()}`;
-                    audio.load();
-                    tryPlayLiveAudio();
-                }, 800);
-            }
         });
         audio.addEventListener('playing', () => {
             if (liveMode) setPlaying(true);
