@@ -138,6 +138,10 @@
 
     <audio id="audio" preload="auto"></audio>
 
+    <div id="tap-overlay" class="hidden fixed inset-x-4 bottom-24 z-40 bg-violet-700/95 border border-violet-400/40 text-white text-sm font-medium text-center px-4 py-3 rounded-2xl shadow-xl cursor-pointer">
+        Toca aquí para escuchar en vivo 🔊
+    </div>
+
     <script>
         const audio = document.getElementById('audio');
         const btnPlay = document.getElementById('btn-play');
@@ -172,6 +176,7 @@
         let mseAppending = false;
         let latestLiveIndex = -1;
         let livePollBusy = false;
+        let autoLiveLock = false;
         const LIVE_POLL_MS = 400;
         const MAX_LIVE_LAG = 6;
 
@@ -256,6 +261,44 @@
             } catch (e) {}
         }
 
+        function showTapOverlay() {
+            document.getElementById('tap-overlay').classList.remove('hidden');
+        }
+
+        function hideTapOverlay() {
+            document.getElementById('tap-overlay').classList.add('hidden');
+        }
+
+        async function tryPlayLiveAudio() {
+            try {
+                audio.muted = true;
+                await audio.play();
+                audio.muted = false;
+                liveStarted = true;
+                setPlaying(true);
+                liveNeedsGesture = false;
+                hideTapOverlay();
+                nowArtist.textContent = liveHostName;
+                return true;
+            } catch (e) {
+                liveNeedsGesture = true;
+                showTapOverlay();
+                nowArtist.textContent = liveHostName;
+                return false;
+            }
+        }
+
+        async function autoJoinLive(data = {}) {
+            if (liveMode || autoLiveLock) return;
+            autoLiveLock = true;
+            try {
+                await unlockAudioElement();
+                enterLiveMode({ host_name: data.host_name || stationLiveHost });
+            } finally {
+                autoLiveLock = false;
+            }
+        }
+
         async function setupMse() {
             if (mediaSource) return;
 
@@ -277,15 +320,7 @@
                 trimMseBuffer();
 
                 if (!liveStarted && sourceBuffer.buffered.length) {
-                    audio.play().then(() => {
-                        liveStarted = true;
-                        setPlaying(true);
-                        liveNeedsGesture = false;
-                        nowArtist.textContent = liveHostName;
-                    }).catch(() => {
-                        liveNeedsGesture = true;
-                        nowArtist.textContent = 'Toca Play para escuchar 🔊';
-                    });
+                    tryPlayLiveAudio();
                 }
             });
 
@@ -353,7 +388,7 @@
                 }
 
                 if (liveStarted && audio.paused && !liveNeedsGesture) {
-                    audio.play().catch(() => {});
+                    tryPlayLiveAudio();
                 }
             } catch (e) {
                 if (liveMode && !liveStarted) {
@@ -378,10 +413,11 @@
                     liveHostName = status.host_name || liveHostName;
                 }
                 liveLoopActive = true;
-                await audio.play().catch(() => {});
+                await tryPlayLiveAudio();
                 livePollAndAppend();
             } catch (e) {
-                nowArtist.textContent = 'Toca Play para escuchar 🔊';
+                nowArtist.textContent = 'Toca aquí abajo para escuchar 🔊';
+                showTapOverlay();
                 liveNeedsGesture = true;
             }
         }
@@ -426,11 +462,12 @@
                 if (data.is_live && liveMode) return;
 
                 if (data.is_live && !liveMode && isPlaying) {
-                    enterLiveMode({ host_name: data.host_name });
+                    await autoJoinLive({ host_name: data.host_name });
                 } else if (!data.is_live && liveMode) {
                     exitLiveMode();
                 } else if (data.is_live && !liveMode) {
                     document.getElementById('live-badge').classList.remove('hidden');
+                    await autoJoinLive({ host_name: data.host_name });
                 } else {
                     document.getElementById('live-badge').classList.add('hidden');
                 }
@@ -479,11 +516,12 @@
             document.getElementById('station-slogan').textContent = data.slogan || '';
             stationIsLive = !!data.is_live;
             stationLiveHost = data.host_name || 'Locutor en vivo';
-            if (stationIsLive) {
+            if (stationIsLive && !liveMode) {
                 document.getElementById('live-badge').classList.remove('hidden');
-                if (!liveMode) {
-                    nowArtist.textContent = '🔴 En vivo — Toca Play';
-                }
+                nowArtist.textContent = 'Conectando en vivo...';
+                await autoJoinLive({ host_name: data.host_name });
+            } else if (!stationIsLive) {
+                document.getElementById('live-badge').classList.add('hidden');
             }
         }
 
@@ -528,19 +566,18 @@
 
         btnPlay.addEventListener('click', () => {
             if (stationIsLive && !liveMode) {
-                unlockAudioElement().finally(() => {
-                    enterLiveMode({ host_name: stationLiveHost });
-                });
+                autoJoinLive({ host_name: stationLiveHost });
                 return;
             }
             if (liveMode) {
-                unlockAudioElement().finally(() => {
-                    if (!liveStarted || audio.paused) {
-                        resumeLivePlayback();
-                    } else {
-                        setPlaying(true);
-                    }
-                });
+                if (!liveStarted || audio.paused || liveNeedsGesture) {
+                    tryPlayLiveAudio().then((ok) => {
+                        if (!ok) resumeLivePlayback();
+                    });
+                } else {
+                    audio.pause();
+                    setPlaying(false);
+                }
                 return;
             }
             if (!queue.length) return;
@@ -564,11 +601,16 @@
             }
         });
 
-        document.body.addEventListener('click', () => {
+        function resumeLiveOnGesture() {
             if (liveMode && liveNeedsGesture) {
-                resumeLivePlayback();
+                tryPlayLiveAudio().then((ok) => {
+                    if (!ok) resumeLivePlayback();
+                });
             }
-        }, { once: false });
+        }
+
+        document.body.addEventListener('click', resumeLiveOnGesture, { once: false });
+        document.getElementById('tap-overlay').addEventListener('click', resumeLiveOnGesture);
 
         audio.addEventListener('error', () => {
             if (liveMode) return;
@@ -651,13 +693,19 @@
             document.getElementById('msg-count').textContent = data.messages.length;
         }
 
+        async function bootstrap() {
+            await loadStation();
+            if (!liveMode && !stationIsLive) {
+                await loadQueue();
+            }
+            setInterval(checkLiveStatus, 3000);
+            setInterval(refreshMessages, 15000);
+        }
+
         const savedName = localStorage.getItem('emisora_sender_name');
         if (savedName) document.getElementById('sender-name').value = savedName;
 
-        loadStation();
-        loadQueue();
-        setInterval(checkLiveStatus, 3000);
-        setInterval(refreshMessages, 15000);
+        bootstrap();
 
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').catch(() => {});
