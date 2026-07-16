@@ -6,4 +6,4 @@ startCommand = "bash scripts/railway-start.sh"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
 healthcheckPath = "/up"
-healthcheckTimeout = 300
+healthcheckTimeout = 120
