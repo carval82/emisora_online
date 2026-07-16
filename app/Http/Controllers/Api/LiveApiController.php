@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Services\LiveStreamService;
 use Illuminate\Http\Request;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class LiveApiController extends Controller
 {
@@ -140,86 +139,4 @@ class LiveApiController extends Controller
         ]);
     }
 
-    public function stream(Request $request): StreamedResponse
-    {
-        if (! $this->live->isActive()) {
-            abort(404);
-        }
-
-        $path = $this->live->getStreamPath();
-        $liveEdge = $request->boolean('live', false);
-        $startPos = max(0, (int) $request->query('pos', 0));
-
-        return response()->stream(function () use ($path, $startPos, $liveEdge) {
-            if (function_exists('apache_setenv')) {
-                @apache_setenv('no-gzip', '1');
-            }
-
-            @ini_set('zlib.output_compression', '0');
-            @ini_set('output_buffering', 'off');
-            @ini_set('implicit_flush', '1');
-            @set_time_limit(0);
-
-            while (ob_get_level() > 0) {
-                ob_end_flush();
-            }
-
-            if ($liveEdge) {
-                $init = $this->live->getInitBinary();
-                if ($init) {
-                    echo $init;
-                    flush();
-                }
-                clearstatcache(true, $path);
-                $pos = is_readable($path) ? (int) filesize($path) : 0;
-            } else {
-                $pos = $startPos;
-            }
-
-            $idleTicks = 0;
-
-            while ($idleTicks < 600) {
-                if (connection_aborted()) {
-                    break;
-                }
-
-                clearstatcache(true, $path);
-                $size = is_readable($path) ? (int) filesize($path) : 0;
-
-                if ($pos < $size) {
-                    $handle = fopen($path, 'rb');
-                    if ($handle) {
-                        fseek($handle, $pos);
-
-                        while ($pos < $size && ! connection_aborted()) {
-                            $chunk = fread($handle, 32768);
-                            if ($chunk === false || $chunk === '') {
-                                break;
-                            }
-
-                            echo $chunk;
-                            $pos += strlen($chunk);
-                            flush();
-                        }
-
-                        fclose($handle);
-                    }
-
-                    $idleTicks = 0;
-                } else {
-                    if (! $this->live->isActive()) {
-                        $idleTicks++;
-                    }
-
-                    usleep(80_000);
-                }
-            }
-        }, 200, [
-            'Content-Type' => 'audio/webm',
-            'Cache-Control' => 'no-cache, no-store',
-            'Pragma' => 'no-cache',
-            'X-Accel-Buffering' => 'no',
-            'X-Live-Active' => '1',
-        ]);
-    }
 }

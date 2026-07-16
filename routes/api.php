@@ -16,7 +16,6 @@ Route::get('/live/chunks', [LiveApiController::class, 'chunks']);
 Route::get('/live/next', [LiveApiController::class, 'next']);
 Route::get('/live/pack', [LiveApiController::class, 'pack']);
 Route::get('/live/init', [LiveApiController::class, 'init']);
-Route::get('/live/stream', [LiveApiController::class, 'stream']);
 Route::get('/live/audio/{index}', [LiveApiController::class, 'audio'])->where('index', '[0-9]+');
 
 Route::prefix('broadcaster')->group(function () {
