@@ -1,18 +1,12 @@
-[phases.setup]
-nixPkgs = ["php82", "php82Extensions.pdo_pgsql", "php82Extensions.pgsql", "php82Extensions.mbstring", "php82Extensions.bcmath", "php82Extensions.xml", "php82Extensions.curl", "php82Extensions.zip", "php82Extensions.fileinfo", "nodejs_22"]
+# Deja que Nixpacks detecte PHP + Composer automáticamente.
+# Solo agregamos extensiones PostgreSQL y el build de Vite.
 
-[phases.install]
-cmds = [
-  "composer install --no-dev --optimize-autoloader --no-interaction",
-  "npm install",
-  "npm run build",
-]
+[variables]
+NIXPACKS_PHP_EXTENSIONS = "pdo_pgsql,pgsql,mbstring,bcmath,xml,curl,zip,fileinfo"
+NIXPACKS_PHP_ROOT_DIR = "/app/public"
 
 [phases.build]
 cmds = [
-  "mkdir -p storage/framework/{cache,sessions,views} storage/app/public storage/logs bootstrap/cache",
-  "chmod -R 775 storage bootstrap/cache || true",
+  "npm ci",
+  "npm run build",
 ]
-
-[start]
-cmd = "bash scripts/railway-start.sh"
