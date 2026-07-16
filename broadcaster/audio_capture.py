@@ -656,7 +656,6 @@ class PythonMixerCapture:
                     break
 
                 encoder.stdin.write(mixed)
-                encoder.stdin.flush()
         except Exception as exc:
             self._stderr_lines.append(f"[mixer] {exc}")
         finally:

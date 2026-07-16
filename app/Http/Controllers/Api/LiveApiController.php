@@ -130,7 +130,7 @@ class LiveApiController extends Controller
         }
 
         $after = (int) $request->query('after', -1);
-        $wait = min(max((int) $request->query('wait', 3000), 1000), 8000);
+        $wait = min(max((int) $request->query('wait', 800), 150), 3000);
         $binary = $this->live->packChunksAfter($after, $wait);
 
         return response($binary, 200, [

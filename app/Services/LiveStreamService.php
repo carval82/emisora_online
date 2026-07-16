@@ -227,7 +227,7 @@ class LiveStreamService
                 return $binary;
             }
 
-            usleep(100_000);
+            usleep(50_000);
         } while (microtime(true) < $deadline);
 
         return '';
@@ -242,7 +242,7 @@ class LiveStreamService
         }
 
         $from = $after < 0 ? 0 : $after + 1;
-        $to = min($latest, $from + 5);
+        $to = min($latest, $from + 3);
         $pack = '';
 
         for ($i = $from; $i <= $to; $i++) {

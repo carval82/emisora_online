@@ -177,8 +177,9 @@
         let latestLiveIndex = -1;
         let livePollBusy = false;
         let autoLiveLock = false;
-        const LIVE_POLL_MS = 400;
-        const MAX_LIVE_LAG = 6;
+        const LIVE_POLL_MS = 120;
+        const MAX_LIVE_LAG = 14;
+        const LIVE_PACK_WAIT = 550;
 
         function teardownLive() {
             liveNeedsGesture = false;
@@ -255,8 +256,8 @@
         function trimMseBuffer() {
             if (!sourceBuffer || sourceBuffer.updating || !audio.currentTime) return;
             try {
-                if (sourceBuffer.buffered.length && audio.currentTime > 15) {
-                    sourceBuffer.remove(0, audio.currentTime - 8);
+                if (sourceBuffer.buffered.length && audio.currentTime > 22) {
+                    sourceBuffer.remove(0, audio.currentTime - 14);
                 }
             } catch (e) {}
         }
@@ -339,11 +340,11 @@
 
         function resetMseLiveEdge() {
             mseAppendQueue = [];
-            lastChunkIndex = Math.max(-1, latestLiveIndex - 2);
+            lastChunkIndex = Math.max(-1, latestLiveIndex - 3);
             try {
                 if (sourceBuffer && !sourceBuffer.updating && sourceBuffer.buffered.length) {
                     const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                    audio.currentTime = Math.max(0, end - 0.05);
+                    audio.currentTime = Math.max(0, end - 0.25);
                 }
             } catch (e) {}
         }
@@ -364,7 +365,7 @@
                     resetMseLiveEdge();
                 }
 
-                const res = await fetch(`/api/live/pack?after=${lastChunkIndex}&wait=1200`);
+                const res = await fetch(`/api/live/pack?after=${lastChunkIndex}&wait=${LIVE_PACK_WAIT}`);
 
                 if (res.status === 204 || res.headers.get('X-Live-Active') === '0') {
                     exitLiveMode();
