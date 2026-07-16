@@ -94,11 +94,6 @@ class BroadcasterApiController extends Controller
         }
 
         $index = $this->live->addChunk($content, $mime);
-        $live = $this->live;
-
-        app()->terminating(function () use ($index, $live) {
-            $live->finalizeChunk($index);
-        });
 
         return response()->json([
             'success' => true,

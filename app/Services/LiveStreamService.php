@@ -75,11 +75,11 @@ class LiveStreamService
         $index = $this->getLatestIndex() + 1;
         $extension = str_contains($mime, 'ogg') ? 'ogg' : (str_contains($mime, 'mp4') ? 'm4a' : 'webm');
 
-        file_put_contents("{$this->chunkPath}/{$index}.{$extension}", $binaryData, LOCK_EX);
+        file_put_contents("{$this->chunkPath}/{$index}.{$extension}", $binaryData);
 
         if ($index === 0) {
             $init = $this->extractWebmInit($binaryData);
-            file_put_contents("{$this->chunkPath}/init.{$extension}", $init, LOCK_EX);
+            file_put_contents("{$this->chunkPath}/init.{$extension}", $init);
         }
 
         $this->writeLiveState([
@@ -88,16 +88,16 @@ class LiveStreamService
             'last_chunk_at' => now()->toIso8601String(),
         ]);
 
+        if ($index > 0 && $index % 20 === 0) {
+            $this->pruneOldChunks($index);
+        }
+
         return $index;
     }
 
+    /** @deprecated Ya no se usa en el hot path; pack lee chunks individuales. */
     public function finalizeChunk(int $index): void
     {
-        $this->appendToStream($index);
-
-        if ($index % 10 === 0) {
-            $this->pruneOldChunks($index);
-        }
     }
 
     public function getChunkPath(int $index): ?string

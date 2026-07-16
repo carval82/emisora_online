@@ -232,7 +232,8 @@ let musicConnected = false;
 let musicSourceMode = 'deck';
 
 const uploadQueue = [];
-let uploadBusy = false;
+let uploadInFlight = 0;
+const MAX_UPLOADS = 2;
 
 function log(msg) {
     const p = document.createElement('p');
@@ -252,9 +253,9 @@ function getMimeType() {
 
 function getRecordingSettings() {
     return {
-        interval: 1000,
+        interval: 2000,
         bitrate: 96000,
-        label: 'Opus limpio 1s',
+        label: 'Opus limpio 2s',
     };
 }
 
@@ -555,16 +556,14 @@ deckPlayer.addEventListener('ended', () => {
 async function uploadChunk(blob, mime) {
     if (!isBroadcasting) return false;
 
-    const formData = new FormData();
-    const ext = mime.includes('ogg') ? 'ogg' : (mime.includes('mp4') ? 'm4a' : 'webm');
-    formData.append('chunk', blob, `chunk.${ext}`);
-    formData.append('mime', mime);
-
     try {
         const r = await fetch('{{ route('admin.live.chunk') }}', {
             method: 'POST',
-            headers: { 'X-CSRF-TOKEN': '{{ csrf_token() }}' },
-            body: formData,
+            headers: {
+                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                'Content-Type': mime,
+            },
+            body: blob,
         });
 
         if (!isBroadcasting) return false;
@@ -587,18 +586,21 @@ async function uploadChunk(blob, mime) {
 }
 
 function enqueueUpload(blob, mime) {
+    if (uploadQueue.length > 4) uploadQueue.shift();
     uploadQueue.push({ blob, mime });
     processUploadQueue();
 }
 
-async function processUploadQueue() {
-    if (uploadBusy || !isBroadcasting) return;
-    uploadBusy = true;
-    while (uploadQueue.length && isBroadcasting) {
+function processUploadQueue() {
+    if (!isBroadcasting) return;
+    while (uploadQueue.length && uploadInFlight < MAX_UPLOADS) {
         const { blob, mime } = uploadQueue.shift();
-        await uploadChunk(blob, mime);
+        uploadInFlight++;
+        uploadChunk(blob, mime).finally(() => {
+            uploadInFlight--;
+            processUploadQueue();
+        });
     }
-    uploadBusy = false;
 }
 
 function startContinuousRecording(mime) {
