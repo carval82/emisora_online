@@ -1,0 +1,17 @@
+{
+    "server_url": "http://127.0.0.1:8000",
+    "email": "",
+    "token": "",
+    "host_name": "Locutor en vivo",
+    "mic_device": "",
+    "cable_device": "",
+    "audio_device": "",
+    "mic_volume": 100,
+    "cable_volume": 85,
+    "master_volume": 100,
+    "mic_enabled": true,
+    "auto_duck": true,
+    "bitrate": "96000",
+    "segment_seconds": 1,
+    "ffmpeg_path": "C:\\ffmpeg\\bin\\ffmpeg.exe"
+}

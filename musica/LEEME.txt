@@ -1,0 +1,14 @@
+CARPETA DE MÚSICA DE LA EMISORA
+================================
+
+Suelta aquí tus archivos de audio (MP3, WAV, OGG, M4A, FLAC).
+
+Puedes crear subcarpetas para organizarlos (por artista, género, etc.);
+la emisora también busca dentro de las subcarpetas.
+
+Luego entra al panel: Admin -> Carpeta local -> "Escanear carpeta"
+y las canciones se importarán automáticamente con su información.
+
+Los archivos NO se copian: se quedan aquí y la emisora los reproduce
+directamente desde esta carpeta. Si borras un archivo de aquí, deja de
+estar disponible en la emisora.
