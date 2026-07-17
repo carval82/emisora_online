@@ -305,7 +305,18 @@
 
         function resetMseLiveEdge() {
             mseAppendQueue = [];
-            lastChunkIndex = Math.max(-1, latestLiveIndex - 3);
+            if (latestLiveIndex >= 0) {
+                // Saltar al borde en vivo sin re-encolar audio ya oído (evita repeticiones).
+                lastChunkIndex = latestLiveIndex;
+                try {
+                    if (sourceBuffer?.buffered.length) {
+                        const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                        if (audio.currentTime < end - 6) {
+                            audio.currentTime = Math.max(0, end - 1.2);
+                        }
+                    }
+                } catch (e) {}
+            }
         }
 
         function scheduleLivePoll(delay = LIVE_POLL_FAST_MS) {

@@ -51,11 +51,12 @@ class BroadcasterApiController extends Controller
             'host_name' => 'nullable|string|max:100',
         ]);
 
-        $this->live->start($validated['host_name'] ?? auth()->user()?->name);
+        $sessionId = $this->live->start($validated['host_name'] ?? auth()->user()?->name);
 
         return response()->json([
             'success' => true,
             'message' => 'Transmisión iniciada',
+            'session_id' => $sessionId,
             'status' => $this->live->getStatus(),
         ]);
     }
@@ -93,7 +94,15 @@ class BroadcasterApiController extends Controller
             return response()->json(['error' => 'No se recibió audio'], 422);
         }
 
-        $index = $this->live->addChunk($content, $mime);
+        $index = $this->live->addChunk(
+            $content,
+            $mime,
+            $request->header('X-Broadcast-Session')
+        );
+
+        if ($index === null) {
+            return response()->json(['error' => 'Sesión de broadcaster inválida'], 403);
+        }
 
         return response()->json([
             'success' => true,

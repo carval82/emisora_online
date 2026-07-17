@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\StationSetting;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Str;
 
 class LiveStreamService
 {
@@ -27,23 +28,34 @@ class LiveStreamService
         $this->statePath = storage_path('app/live/state.json');
     }
 
-    public function start(?string $hostName = null): void
+    /** Intervalo mínimo entre chunks aceptados (evita 2–3 uploaders duplicados). */
+    private const MIN_CHUNK_INTERVAL_MS = 700;
+
+    public function start(?string $hostName = null): string
     {
         $station = StationSetting::current();
         $host = $hostName ?: 'Locutor en vivo';
 
         // Evita que una segunda instancia del broadcaster borre chunks en curso.
         if ($this->isActive()) {
-            $this->writeLiveState(['host' => $host]);
+            $state = $this->readLiveState();
+            $sessionId = (string) ($state['session_id'] ?? '');
+            if ($sessionId === '') {
+                $sessionId = Str::random(32);
+                $this->writeLiveState(['host' => $host, 'session_id' => $sessionId]);
+            } else {
+                $this->writeLiveState(['host' => $host]);
+            }
             $station->update(['live_host_name' => $host]);
 
-            return;
+            return $sessionId;
         }
 
         $this->clearChunks();
         File::ensureDirectoryExists($this->chunkPath);
 
         $startedAt = now()->toIso8601String();
+        $sessionId = Str::random(32);
 
         $this->writeLiveState([
             'active' => true,
@@ -52,6 +64,7 @@ class LiveStreamService
             'started_at' => $startedAt,
             'last_chunk_at' => null,
             'stream_bytes' => 0,
+            'session_id' => $sessionId,
         ]);
 
         $station->update([
@@ -59,6 +72,8 @@ class LiveStreamService
             'live_host_name' => $hostName,
             'live_started_at' => now(),
         ]);
+
+        return $sessionId;
     }
 
     public function stop(): void
@@ -76,11 +91,30 @@ class LiveStreamService
         ]);
     }
 
-    public function addChunk(string $binaryData, string $mime): int
+    public function addChunk(string $binaryData, string $mime, ?string $sessionId = null): ?int
     {
         File::ensureDirectoryExists($this->chunkPath);
 
-        $index = $this->getLatestIndex() + 1;
+        $state = $this->readLiveState();
+        $expectedSession = (string) ($state['session_id'] ?? '');
+
+        if ($expectedSession !== '') {
+            if ($sessionId === null || $sessionId === '' || ! hash_equals($expectedSession, $sessionId)) {
+                return null;
+            }
+        }
+
+        $currentIndex = (int) ($state['index'] ?? -1);
+        $lastAt = $state['last_chunk_at'] ?? null;
+
+        if ($lastAt && $currentIndex >= 0) {
+            $elapsed = (int) ((microtime(true) - strtotime($lastAt)) * 1000);
+            if ($elapsed < self::MIN_CHUNK_INTERVAL_MS) {
+                return $currentIndex;
+            }
+        }
+
+        $index = $currentIndex + 1;
         $extension = str_contains($mime, 'ogg') ? 'ogg' : (str_contains($mime, 'mp4') ? 'm4a' : 'webm');
 
         file_put_contents("{$this->chunkPath}/{$index}.{$extension}", $binaryData);
@@ -315,7 +349,13 @@ class LiveStreamService
         }
 
         if ($after >= 0 && ! $this->getChunkPath($after + 1) && $latest > $after) {
-            return max(-1, $latest - self::JOIN_CATCHUP_CHUNKS);
+            for ($i = $after + 1; $i <= $latest; $i++) {
+                if ($this->getChunkPath($i)) {
+                    return $i - 1;
+                }
+            }
+
+            return $latest;
         }
 
         return $after;
@@ -440,6 +480,7 @@ class LiveStreamService
             'started_at' => null,
             'last_chunk_at' => null,
             'stream_bytes' => 0,
+            'session_id' => null,
         ], $data);
     }
 
