@@ -245,7 +245,7 @@ class LiveStreamService
         if ($start <= 0 && $this->getChunkPath(0)) {
             $chunks[] = [
                 'index' => 0,
-                'url' => url('/api/live/audio/0'),
+                'url' => '/api/live/audio/0',
                 'mime' => $this->getChunkMime(0),
             ];
             $start = 1;
@@ -255,7 +255,7 @@ class LiveStreamService
             if ($this->getChunkPath($i)) {
                 $chunks[] = [
                     'index' => $i,
-                    'url' => url("/api/live/audio/{$i}"),
+                    'url' => "/api/live/audio/{$i}",
                     'mime' => $this->getChunkMime($i),
                 ];
             }
