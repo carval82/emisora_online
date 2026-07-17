@@ -29,8 +29,19 @@ class PlayerController extends ChangeNotifier {
   bool loading = true;
   String? error;
   bool isPlaying = false;
+  bool liveBuffering = false;
+  int liveBufferSeconds = 0;
   Duration position = Duration.zero;
   Duration? duration;
+
+  /// Segundos de audio en cola antes de iniciar (sacrifica latencia por fluidez).
+  static const int _liveStartBufferChunks = 6;
+  static const int _liveLowBufferChunks = 3;
+  static const int _liveResumeBufferChunks = 5;
+  static const int _liveFetchLimit = 10;
+  static const int _liveMaxLagBeforeReset = 24;
+  static const int _liveMaxPlaylistChunks = 48;
+  static const int _liveCatchupChunks = 10;
 
   String senderName = 'Oyente';
   String get serverUrl => _api.baseUrl;
@@ -41,6 +52,9 @@ class PlayerController extends ChangeNotifier {
   int _liveLastAddedIndex = -1;
   bool _liveLoopActive = false;
   String? _liveStartedAt;
+  bool _livePlaybackStarted = false;
+  bool _livePausedForBuffer = false;
+  int? _livePlayingSequenceIndex;
   bool _disposed = false;
   DateTime _lastLiveStatusPoll = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -60,7 +74,14 @@ class PlayerController extends ChangeNotifier {
   }
 
   String get nowArtist {
-    if (mode == PlayerMode.live) return 'EN VIVO';
+    if (mode == PlayerMode.live) {
+      if (liveBuffering) {
+        return liveBufferSeconds > 0
+            ? 'Cargando buffer (${liveBufferSeconds}s)...'
+            : 'Cargando buffer...';
+      }
+      return liveBufferSeconds > 0 ? 'EN VIVO · +${liveBufferSeconds}s' : 'EN VIVO';
+    }
     if (queue.isEmpty) return '—';
     return queue[currentIndex.clamp(0, queue.length - 1)].artist;
   }
@@ -92,6 +113,9 @@ class PlayerController extends ChangeNotifier {
       if (mode == PlayerMode.queue && index != null && queue.isNotEmpty) {
         currentIndex = index % queue.length;
         notifyListeners();
+      } else if (mode == PlayerMode.live && index != null) {
+        _livePlayingSequenceIndex = index;
+        unawaited(_updateLiveBufferState());
       }
     });
 
@@ -252,12 +276,80 @@ class PlayerController extends ChangeNotifier {
   }
 
   AudioSource _liveSource(String url, MediaItem tag) {
-    return AudioSource.uri(Uri.parse(url), tag: tag);
+    return LockCachingAudioSource(Uri.parse(url), tag: tag);
   }
 
   int _liveCatchupAfter(int latestIndex) {
     if (latestIndex < 0) return -1;
-    return latestIndex > 3 ? latestIndex - 3 : -1;
+    return latestIndex > _liveCatchupChunks ? latestIndex - _liveCatchupChunks : -1;
+  }
+
+  int _liveChunksAhead() {
+    if (_livePlaylist == null) return 0;
+    final total = _livePlaylist!.length;
+    if (total == 0) return 0;
+    final current = _livePlayingSequenceIndex ?? 0;
+    return (total - current - 1).clamp(0, total);
+  }
+
+  void _syncLiveBufferMetrics() {
+    liveBufferSeconds = _liveChunksAhead();
+  }
+
+  Future<void> _updateLiveBufferState() async {
+    if (!_liveLoopActive || _livePlaylist == null || mode != PlayerMode.live) return;
+
+    _syncLiveBufferMetrics();
+    final ahead = liveBufferSeconds;
+    final total = _livePlaylist!.length;
+
+    if (!_livePlaybackStarted) {
+      liveBuffering = total < _liveStartBufferChunks;
+      if (!liveBuffering) {
+        _livePlaybackStarted = true;
+        _livePausedForBuffer = false;
+        try {
+          await _player.play();
+        } catch (e) {
+          debugPrint('Live play: $e');
+        }
+      }
+      notifyListeners();
+      return;
+    }
+
+    if (ahead < _liveLowBufferChunks && _player.playing) {
+      _livePausedForBuffer = true;
+      liveBuffering = true;
+      await _player.pause();
+      notifyListeners();
+      return;
+    }
+
+    if (_livePausedForBuffer && ahead >= _liveResumeBufferChunks) {
+      _livePausedForBuffer = false;
+      liveBuffering = false;
+      try {
+        await _player.play();
+      } catch (e) {
+        debugPrint('Live resume: $e');
+      }
+      notifyListeners();
+      return;
+    }
+
+    if (!_livePausedForBuffer) {
+      liveBuffering = false;
+    }
+    notifyListeners();
+  }
+
+  void _resetLiveBufferState({required bool buffering}) {
+    _livePlaybackStarted = false;
+    _livePausedForBuffer = false;
+    _livePlayingSequenceIndex = null;
+    liveBuffering = buffering;
+    liveBufferSeconds = 0;
   }
 
   Future<void> _startQueuePlayback(int startIndex) async {
@@ -291,6 +383,7 @@ class PlayerController extends ChangeNotifier {
     _queuePlaylist = null;
     _liveAddedIndices.clear();
     _liveStartedAt = station?.liveStartedAt;
+    _resetLiveBufferState(buffering: true);
     _startPolling();
 
     await _player.stop();
@@ -300,12 +393,11 @@ class PlayerController extends ChangeNotifier {
     _lastLiveStatusPoll = DateTime.now();
 
     _livePlaylist = ConcatenatingAudioSource(
-      useLazyPreparation: true,
+      useLazyPreparation: false,
       children: [],
     );
 
     await _player.setAudioSource(_livePlaylist!, preload: true);
-    await _player.play();
     notifyListeners();
 
     unawaited(_liveFetchLoop());
@@ -314,19 +406,21 @@ class PlayerController extends ChangeNotifier {
   Future<void> _restartLiveSession(Station next) async {
     _liveStartedAt = next.liveStartedAt;
     final latest = next.latestIndex ?? -1;
+    _resetLiveBufferState(buffering: true);
     await _resetLivePlaylist(_liveCatchupAfter(latest));
   }
 
   Future<void> _resetLivePlaylist(int afterIndex) async {
     _liveLastAddedIndex = afterIndex;
     _liveAddedIndices.removeWhere((i) => i <= afterIndex);
+    _resetLiveBufferState(buffering: true);
     await _player.stop();
     _livePlaylist = ConcatenatingAudioSource(
-      useLazyPreparation: true,
+      useLazyPreparation: false,
       children: [],
     );
     await _player.setAudioSource(_livePlaylist!, preload: true);
-    await _player.play();
+    notifyListeners();
   }
 
   Future<void> _exitLiveMode({bool resumeQueue = false}) async {
@@ -335,6 +429,7 @@ class PlayerController extends ChangeNotifier {
     _liveAddedIndices.clear();
     _liveStartedAt = null;
     _livePlaylist = null;
+    _resetLiveBufferState(buffering: false);
     await _player.stop();
     mode = queue.isEmpty ? PlayerMode.idle : PlayerMode.queue;
     _startPolling();
@@ -357,19 +452,19 @@ class PlayerController extends ChangeNotifier {
             await _exitLiveMode(resumeQueue: true);
             break;
           }
-          if (status.latestIndex - _liveLastAddedIndex > 14) {
+          if (status.latestIndex - _liveLastAddedIndex > _liveMaxLagBeforeReset) {
             await _resetLivePlaylist(_liveCatchupAfter(status.latestIndex));
           }
         }
 
-        if (_livePlaylist != null && _livePlaylist!.length > 35) {
+        if (_livePlaylist != null && _livePlaylist!.length > _liveMaxPlaylistChunks) {
           final status = await _api.fetchLiveStatus();
           await _resetLivePlaylist(_liveCatchupAfter(status.latestIndex));
         }
 
         final response = await _api.fetchLiveChunks(
           after: _liveLastAddedIndex,
-          limit: 6,
+          limit: _liveFetchLimit,
         );
 
         if (!response.isLive) {
@@ -397,14 +492,19 @@ class PlayerController extends ChangeNotifier {
         }
 
         if (added > 0) {
-          notifyListeners();
+          await _updateLiveBufferState();
         } else if (_livePlaylist != null && _livePlaylist!.length == 0 && response.latestIndex >= 0) {
-          // Sin buffer aún: acercar al borde en vivo sin quedarse mudo.
           _liveLastAddedIndex = _liveCatchupAfter(response.latestIndex);
+        } else {
+          await _updateLiveBufferState();
         }
 
         final pending = response.latestIndex - _liveLastAddedIndex;
-        await Future.delayed(Duration(milliseconds: pending > 2 ? 220 : 450));
+        final ahead = _liveChunksAhead();
+        final delayMs = liveBuffering || !_livePlaybackStarted
+            ? 180
+            : (pending > 2 || ahead < _liveResumeBufferChunks ? 250 : 400);
+        await Future.delayed(Duration(milliseconds: delayMs));
       } catch (e) {
         debugPrint('Live fetch: $e');
         await Future.delayed(const Duration(milliseconds: 600));
