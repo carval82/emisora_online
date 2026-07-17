@@ -30,11 +30,19 @@ class LiveStreamService
     public function start(?string $hostName = null): void
     {
         $station = StationSetting::current();
+        $host = $hostName ?: 'Locutor en vivo';
+
+        // Evita que una segunda instancia del broadcaster borre chunks en curso.
+        if ($this->isActive()) {
+            $this->writeLiveState(['host' => $host]);
+            $station->update(['live_host_name' => $host]);
+
+            return;
+        }
 
         $this->clearChunks();
         File::ensureDirectoryExists($this->chunkPath);
 
-        $host = $hostName ?: 'Locutor en vivo';
         $startedAt = now()->toIso8601String();
 
         $this->writeLiveState([

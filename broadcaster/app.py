@@ -4,6 +4,7 @@ Emisora Broadcaster — consola de transmisión con mezclador integrado.
 
 from __future__ import annotations
 
+import ctypes
 import shutil
 import sys
 import threading
@@ -49,6 +50,27 @@ def ensure_config(config_path: Path) -> None:
 APP_DIR = get_app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 CHUNKS_DIR = APP_DIR / "temp_chunks"
+_INSTANCE_MUTEX = None
+
+
+def ensure_single_instance() -> None:
+    """Solo una ventana del broadcaster (evita doble POST /chunk en logs)."""
+    global _INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return
+
+    kernel32 = ctypes.windll.kernel32
+    _INSTANCE_MUTEX = kernel32.CreateMutexW(None, True, "Global\\EmisoraBroadcaster_SingleInstance")
+    if kernel32.GetLastError() == 183:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Broadcaster ya abierto",
+            "Solo puede haber una ventana de Emisora Broadcaster.\n\n"
+            "Cierra la otra instancia en el Administrador de tareas (EmisoraBroadcaster.exe).",
+        )
+        root.destroy()
+        sys.exit(1)
 
 COLORS = {
     "bg": "#0a0a0f",
@@ -94,6 +116,7 @@ class BroadcasterApp(tk.Tk):
         self.broadcasting = False
         self.connected = False
         self.chunks_sent = 0
+        self._live_host = "Locutor en vivo"
         self._logo_image = None
         self._vu_job: str | None = None
         self._mic_on = True
@@ -529,6 +552,7 @@ class BroadcasterApp(tk.Tk):
 
         try:
             host = self.host_name.get().strip() or "Locutor en vivo"
+            self._live_host = host
             self.client.start(host)
 
             segment = int(self.config_data.get("segment_seconds", 1))
@@ -627,6 +651,9 @@ class BroadcasterApp(tk.Tk):
 
     def _upload_loop(self) -> None:
         uploaded: set[str] = set()
+        forbidden_streak = 0
+        last_resync = 0.0
+
         while not self.upload_stop.is_set():
             if not self.client:
                 break
@@ -642,9 +669,31 @@ class BroadcasterApp(tk.Tk):
                         continue
                     data = self.client.upload_chunk(path)
                     if data.get("forbidden"):
-                        path.unlink(missing_ok=True)
-                        time.sleep(1.5)
+                        forbidden_streak += 1
+                        now = time.time()
+                        if forbidden_streak >= 2 and self.broadcasting and now - last_resync > 10:
+                            try:
+                                self.client.start(self._live_host)
+                                last_resync = now
+                                forbidden_streak = 0
+                                self.after(
+                                    0,
+                                    lambda: self.log_line(
+                                        "⚠ Servidor sin transmisión activa — sesión reanudada automáticamente"
+                                    ),
+                                )
+                            except Exception as exc:
+                                self.after(0, lambda e=exc: self.log_line(f"Re-sync fallido: {e}"))
+                        elif forbidden_streak == 1:
+                            self.after(
+                                0,
+                                lambda: self.log_line(
+                                    "⚠ Chunk rechazado (403): transmisión no activa en servidor"
+                                ),
+                            )
+                        time.sleep(1.0)
                         continue
+                    forbidden_streak = 0
                     uploaded.add(path.name)
                     self.chunks_sent += 1
                     self.after(0, lambda i=data.get("index"), s=data.get("size"): self.log_line(f"✓ chunk {i} ({round((s or 0)/1024)} KB)"))
@@ -663,6 +712,7 @@ class BroadcasterApp(tk.Tk):
 
 
 def main() -> None:
+    ensure_single_instance()
     ensure_config(CONFIG_PATH)
     app = BroadcasterApp()
     app.protocol("WM_DELETE_WINDOW", app.on_close)
