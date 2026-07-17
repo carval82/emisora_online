@@ -34,14 +34,12 @@ class PlayerController extends ChangeNotifier {
   Duration position = Duration.zero;
   Duration? duration;
 
-  /// Segundos de audio en cola antes de iniciar (sacrifica latencia por fluidez).
-  static const int _liveStartBufferChunks = 6;
-  static const int _liveLowBufferChunks = 3;
-  static const int _liveResumeBufferChunks = 5;
-  static const int _liveFetchLimit = 10;
-  static const int _liveMaxLagBeforeReset = 24;
-  static const int _liveMaxPlaylistChunks = 48;
-  static const int _liveCatchupChunks = 10;
+  /// Buffer corto solo con chunks NUEVOS desde el borde en vivo (~4 s de retraso).
+  static const int _liveStartBufferChunks = 4;
+  static const int _liveFetchLimit = 8;
+  static const int _liveMaxStaleBehindEdge = 6;
+  static const int _liveMaxLagBeforeReset = 18;
+  static const int _liveMaxPlaylistChunks = 36;
 
   String senderName = 'Oyente';
   String get serverUrl => _api.baseUrl;
@@ -53,7 +51,7 @@ class PlayerController extends ChangeNotifier {
   bool _liveLoopActive = false;
   String? _liveStartedAt;
   bool _livePlaybackStarted = false;
-  bool _livePausedForBuffer = false;
+  int _liveServerLatestIndex = -1;
   int? _livePlayingSequenceIndex;
   bool _disposed = false;
   DateTime _lastLiveStatusPoll = DateTime.fromMillisecondsSinceEpoch(0);
@@ -77,8 +75,8 @@ class PlayerController extends ChangeNotifier {
     if (mode == PlayerMode.live) {
       if (liveBuffering) {
         return liveBufferSeconds > 0
-            ? 'Cargando buffer (${liveBufferSeconds}s)...'
-            : 'Cargando buffer...';
+            ? 'Sincronizando ($liveBufferSeconds s en cola)...'
+            : 'Sincronizando en vivo...';
       }
       return liveBufferSeconds > 0 ? 'EN VIVO · +${liveBufferSeconds}s' : 'EN VIVO';
     }
@@ -276,12 +274,15 @@ class PlayerController extends ChangeNotifier {
   }
 
   AudioSource _liveSource(String url, MediaItem tag) {
-    return LockCachingAudioSource(Uri.parse(url), tag: tag);
+    return AudioSource.uri(Uri.parse(url), tag: tag);
   }
 
-  int _liveCatchupAfter(int latestIndex) {
-    if (latestIndex < 0) return -1;
-    return latestIndex > _liveCatchupChunks ? latestIndex - _liveCatchupChunks : -1;
+  bool _acceptLiveChunk(int chunkIndex, int latestIndex) {
+    if (chunkIndex <= _liveLastAddedIndex) return false;
+    if (latestIndex >= 0 && chunkIndex < latestIndex - _liveMaxStaleBehindEdge) {
+      return false;
+    }
+    return true;
   }
 
   int _liveChunksAhead() {
@@ -300,56 +301,42 @@ class PlayerController extends ChangeNotifier {
     if (!_liveLoopActive || _livePlaylist == null || mode != PlayerMode.live) return;
 
     _syncLiveBufferMetrics();
-    final ahead = liveBufferSeconds;
     final total = _livePlaylist!.length;
 
-    if (!_livePlaybackStarted) {
-      liveBuffering = total < _liveStartBufferChunks;
-      if (!liveBuffering) {
-        _livePlaybackStarted = true;
-        _livePausedForBuffer = false;
-        try {
-          await _player.play();
-        } catch (e) {
-          debugPrint('Live play: $e');
-        }
-      }
-      notifyListeners();
-      return;
-    }
-
-    if (ahead < _liveLowBufferChunks && _player.playing) {
-      _livePausedForBuffer = true;
-      liveBuffering = true;
-      await _player.pause();
-      notifyListeners();
-      return;
-    }
-
-    if (_livePausedForBuffer && ahead >= _liveResumeBufferChunks) {
-      _livePausedForBuffer = false;
+    if (!_livePlaybackStarted && total >= _liveStartBufferChunks) {
+      _livePlaybackStarted = true;
       liveBuffering = false;
       try {
         await _player.play();
       } catch (e) {
-        debugPrint('Live resume: $e');
+        debugPrint('Live play: $e');
       }
-      notifyListeners();
-      return;
+    } else if (!_livePlaybackStarted) {
+      liveBuffering = true;
     }
 
-    if (!_livePausedForBuffer) {
-      liveBuffering = false;
-    }
     notifyListeners();
   }
 
   void _resetLiveBufferState({required bool buffering}) {
     _livePlaybackStarted = false;
-    _livePausedForBuffer = false;
     _livePlayingSequenceIndex = null;
     liveBuffering = buffering;
     liveBufferSeconds = 0;
+  }
+
+  Future<void> _jumpToLiveEdge(int latestIndex) async {
+    _liveServerLatestIndex = latestIndex;
+    _liveLastAddedIndex = latestIndex;
+    _liveAddedIndices.clear();
+    _resetLiveBufferState(buffering: true);
+    await _player.stop();
+    _livePlaylist = ConcatenatingAudioSource(
+      useLazyPreparation: true,
+      children: [],
+    );
+    await _player.setAudioSource(_livePlaylist!, preload: true);
+    notifyListeners();
   }
 
   Future<void> _startQueuePlayback(int startIndex) async {
@@ -389,11 +376,12 @@ class PlayerController extends ChangeNotifier {
     await _player.stop();
 
     final status = await _api.fetchLiveStatus();
-    _liveLastAddedIndex = _liveCatchupAfter(status.latestIndex);
+    _liveServerLatestIndex = status.latestIndex;
+    _liveLastAddedIndex = status.latestIndex;
     _lastLiveStatusPoll = DateTime.now();
 
     _livePlaylist = ConcatenatingAudioSource(
-      useLazyPreparation: false,
+      useLazyPreparation: true,
       children: [],
     );
 
@@ -405,22 +393,11 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> _restartLiveSession(Station next) async {
     _liveStartedAt = next.liveStartedAt;
-    final latest = next.latestIndex ?? -1;
-    _resetLiveBufferState(buffering: true);
-    await _resetLivePlaylist(_liveCatchupAfter(latest));
+    await _jumpToLiveEdge(next.latestIndex ?? -1);
   }
 
-  Future<void> _resetLivePlaylist(int afterIndex) async {
-    _liveLastAddedIndex = afterIndex;
-    _liveAddedIndices.removeWhere((i) => i <= afterIndex);
-    _resetLiveBufferState(buffering: true);
-    await _player.stop();
-    _livePlaylist = ConcatenatingAudioSource(
-      useLazyPreparation: false,
-      children: [],
-    );
-    await _player.setAudioSource(_livePlaylist!, preload: true);
-    notifyListeners();
+  Future<void> _resetLivePlaylist(int latestIndex) async {
+    await _jumpToLiveEdge(latestIndex);
   }
 
   Future<void> _exitLiveMode({bool resumeQueue = false}) async {
@@ -452,14 +429,17 @@ class PlayerController extends ChangeNotifier {
             await _exitLiveMode(resumeQueue: true);
             break;
           }
-          if (status.latestIndex - _liveLastAddedIndex > _liveMaxLagBeforeReset) {
-            await _resetLivePlaylist(_liveCatchupAfter(status.latestIndex));
+          if (_liveLastAddedIndex >= 0 &&
+              status.latestIndex - _liveLastAddedIndex > _liveMaxLagBeforeReset) {
+            await _jumpToLiveEdge(status.latestIndex);
+            continue;
           }
         }
 
         if (_livePlaylist != null && _livePlaylist!.length > _liveMaxPlaylistChunks) {
           final status = await _api.fetchLiveStatus();
-          await _resetLivePlaylist(_liveCatchupAfter(status.latestIndex));
+          await _jumpToLiveEdge(status.latestIndex);
+          continue;
         }
 
         final response = await _api.fetchLiveChunks(
@@ -472,14 +452,17 @@ class PlayerController extends ChangeNotifier {
           break;
         }
 
+        _liveServerLatestIndex = response.latestIndex;
+
         if (response.reset) {
-          await _resetLivePlaylist(_liveCatchupAfter(response.latestIndex));
+          await _jumpToLiveEdge(response.latestIndex);
+          continue;
         }
 
         var added = 0;
         for (final chunk in response.chunks) {
           if (!_liveLoopActive || _livePlaylist == null) break;
-          if (chunk.index <= _liveLastAddedIndex) continue;
+          if (!_acceptLiveChunk(chunk.index, response.latestIndex)) continue;
           if (_liveAddedIndices.contains(chunk.index)) continue;
 
           final url = _api.resolveUrl(chunk.url);
@@ -491,19 +474,14 @@ class PlayerController extends ChangeNotifier {
           added++;
         }
 
-        if (added > 0) {
-          await _updateLiveBufferState();
-        } else if (_livePlaylist != null && _livePlaylist!.length == 0 && response.latestIndex >= 0) {
-          _liveLastAddedIndex = _liveCatchupAfter(response.latestIndex);
-        } else {
+        if (added > 0 || !_livePlaybackStarted) {
           await _updateLiveBufferState();
         }
 
         final pending = response.latestIndex - _liveLastAddedIndex;
-        final ahead = _liveChunksAhead();
-        final delayMs = liveBuffering || !_livePlaybackStarted
-            ? 180
-            : (pending > 2 || ahead < _liveResumeBufferChunks ? 250 : 400);
+        final delayMs = !_livePlaybackStarted
+            ? 200
+            : (pending > 1 ? 280 : 420);
         await Future.delayed(Duration(milliseconds: delayMs));
       } catch (e) {
         debugPrint('Live fetch: $e');

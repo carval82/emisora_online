@@ -100,7 +100,7 @@ class HomeScreen extends StatelessWidget {
                                   Padding(
                                     padding: const EdgeInsets.only(top: 6),
                                     child: Text(
-                                      'Preparando audio fluido (~6 s de retraso)',
+                                      'Esperando señal actual (~4 s)',
                                       style: TextStyle(
                                         color: Colors.purple.shade200.withOpacity(0.55),
                                         fontSize: 11,
