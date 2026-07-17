@@ -23,11 +23,13 @@ class LiveApiController extends Controller
 
         $after = (int) $request->query('after', -1);
         $limit = min(max((int) $request->query('limit', 6), 1), 12);
+        $latest = $this->live->getLatestIndex();
 
         return response()->json([
             'is_live' => true,
             'chunks' => $this->live->getChunksAfter($after, $limit),
-            'latest_index' => $this->live->getLatestIndex(),
+            'latest_index' => $latest,
+            'reset' => $after > $latest,
         ]);
     }
 
@@ -129,13 +131,15 @@ class LiveApiController extends Controller
         }
 
         $after = (int) $request->query('after', -1);
+        $latest = $this->live->getLatestIndex();
         $binary = $this->live->packChunksAfter($after);
 
         return response($binary, 200, [
             'Content-Type' => 'application/octet-stream',
             'Cache-Control' => 'no-cache, no-store',
             'X-Live-Active' => '1',
-            'X-Latest-Index' => (string) $this->live->getLatestIndex(),
+            'X-Latest-Index' => (string) $latest,
+            'X-Stream-Reset' => $after > $latest ? '1' : '0',
         ]);
     }
 

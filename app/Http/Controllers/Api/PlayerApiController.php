@@ -50,6 +50,8 @@ class PlayerApiController extends Controller
             'logo_url' => $station->logo_url,
             'is_live' => $liveStatus['is_live'],
             'host_name' => $liveStatus['is_live'] ? $liveStatus['host_name'] : $station->live_host_name,
+            'live_started_at' => $liveStatus['is_live'] ? $liveStatus['started_at'] : null,
+            'latest_index' => $liveStatus['is_live'] ? $liveStatus['latest_index'] : null,
             'playlist' => $station->currentPlaylist?->name,
         ]);
     }

@@ -175,6 +175,7 @@
         let mseAppending = false;
         let lastChunkIndex = -1;
         let latestLiveIndex = -1;
+        let liveStartedAt = null;
         let livePollBusy = false;
         let livePollAbort = null;
         let autoLiveLock = false;
@@ -188,6 +189,7 @@
             liveLoopActive = false;
             lastChunkIndex = -1;
             latestLiveIndex = -1;
+            liveStartedAt = null;
             livePollBusy = false;
             mseInitDone = false;
             mseAppendQueue = [];
@@ -322,7 +324,7 @@
             try {
                 if (!mseInitDone) await setupMse();
 
-                if (latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
+                if (latestLiveIndex >= 0 && (lastChunkIndex > latestLiveIndex || latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG)) {
                     resetMseLiveEdge();
                 }
 
@@ -339,6 +341,9 @@
                 }
 
                 latestLiveIndex = parseInt(res.headers.get('X-Latest-Index') || '-1', 10);
+                if (res.headers.get('X-Stream-Reset') === '1' || (latestLiveIndex >= 0 && lastChunkIndex > latestLiveIndex)) {
+                    resetMseLiveEdge();
+                }
                 if (latestLiveIndex >= 0 && latestLiveIndex - lastChunkIndex > MAX_LIVE_LAG) {
                     resetMseLiveEdge();
                 }
@@ -465,15 +470,23 @@
                 stationIsLive = !!data.is_live;
                 stationLiveHost = data.host_name || stationLiveHost;
 
-                if (data.is_live && liveMode) return;
+                if (data.is_live && liveMode) {
+                    if (data.live_started_at && liveStartedAt && data.live_started_at !== liveStartedAt) {
+                        teardownLive();
+                        liveStartedAt = data.live_started_at;
+                        latestLiveIndex = data.latest_index ?? -1;
+                        startLiveStream();
+                    }
+                    return;
+                }
 
                 if (data.is_live && !liveMode && isPlaying) {
-                    await autoJoinLive({ host_name: data.host_name });
+                    await autoJoinLive(data);
                 } else if (!data.is_live && liveMode) {
                     exitLiveMode();
                 } else if (data.is_live && !liveMode) {
                     document.getElementById('live-badge').classList.remove('hidden');
-                    await autoJoinLive({ host_name: data.host_name });
+                    await autoJoinLive(data);
                 } else {
                     document.getElementById('live-badge').classList.add('hidden');
                 }
@@ -483,6 +496,7 @@
         function enterLiveMode(data) {
             liveMode = true;
             liveHostName = data.host_name || 'En directo';
+            liveStartedAt = data.live_started_at || data.started_at || null;
             teardownLive();
             startLiveStream();
             document.getElementById('live-badge').classList.remove('hidden');

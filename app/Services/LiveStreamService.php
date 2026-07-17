@@ -195,6 +195,7 @@ class LiveStreamService
     public function getChunksAfter(int $after, int $limit = 0): array
     {
         $latest = $this->getLatestIndex();
+        $after = $this->normalizeAfterIndex($after, $latest);
         $chunks = [];
 
         $start = $after + 1;
@@ -245,6 +246,8 @@ class LiveStreamService
             return '';
         }
 
+        $after = $this->normalizeAfterIndex($after, $latest);
+
         $from = $after < 0 ? 0 : $after + 1;
         $to = min($latest, $from + 3);
         $pack = '';
@@ -290,6 +293,24 @@ class LiveStreamService
         $data = file_get_contents($path);
 
         return $data === false || strlen($data) < 10 ? null : $data;
+    }
+
+    /** Si el oyente pide chunks viejos (p. ej. tras reinicio del broadcaster), saltar al borde en vivo. */
+    private function normalizeAfterIndex(int $after, int $latest): int
+    {
+        if ($latest < 0) {
+            return -1;
+        }
+
+        if ($after > $latest) {
+            return max(-1, $latest - self::JOIN_CATCHUP_CHUNKS);
+        }
+
+        if ($after >= 0 && ! $this->getChunkPath($after + 1) && $latest > $after) {
+            return max(-1, $latest - self::JOIN_CATCHUP_CHUNKS);
+        }
+
+        return $after;
     }
 
     private function packChunk(int $index, string $data): string
